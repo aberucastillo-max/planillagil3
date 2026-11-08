@@ -32,6 +32,7 @@ def crear_cuenta(nombre: str, plan: str, max_empresas=None, max_trabajadores=Non
     finally:
         db.close()
     print(f"Cuenta creada. API key (guárdela ahora; no se vuelve a mostrar):\n{clave}")
+    return clave
 
 
 if __name__ == "__main__":

@@ -161,3 +161,19 @@ def test_parametros_del_diccionario_visibles(entorno):
     r = cli.get(f"/api/v1/empresas/{eid}/diccionario/parametros", headers=H(clave)).json()
     assert r["diccionario"] == "RG_728 v1" and r["parametros"]["UIT"].startswith("5500")
     assert [a["nombre"] for a in r["afps"]] == ["HABITAT", "INTEGRA", "PRIMA", "PROFUTURO"]
+
+
+def test_pagina_de_alta_inicial_sin_consola(entorno, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    monkeypatch.delenv("SETUP_TOKEN", raising=False)
+    with TestClient(app) as c:                     # el arranque crea tablas y siembra el Diccionario solo
+        assert c.get("/setup").status_code == 404   # sin SETUP_TOKEN la página no existe
+        monkeypatch.setenv("SETUP_TOKEN", "mi-codigo-secreto")
+        assert c.get("/setup").status_code == 200
+        assert c.post("/setup", data={"token": "malo", "nombre": "X", "plan": "GRATIS"}).status_code == 403
+        r = c.post("/setup", data={"token": "mi-codigo-secreto", "nombre": "Estudio Demo", "plan": "GRATIS"})
+        assert r.status_code == 200 and "pa_" in r.text
+        clave = r.text.split("pa_", 1)[1].split("<", 1)[0]
+        creada = c.post("/api/v1/empresas", headers=H("pa_" + clave), json={"ruc": "20999999999", "razon_social": "Cliente Auto SAC"})
+        assert creada.status_code == 201, creada.text

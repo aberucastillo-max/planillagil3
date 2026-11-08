@@ -4,6 +4,11 @@ import os
 
 def normalizar_url(url: str) -> str:
     """Neon entrega postgresql://...; SQLAlchemy necesita el driver explícito."""
+    url = url.strip().strip('"').strip("'")
+    for extra in ("&channel_binding=require", "channel_binding=require&", "?channel_binding=require"):
+        url = url.replace(extra, "?" if extra.startswith("?") else "")
+    if url.endswith("?"):
+        url = url[:-1]
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+psycopg2://", 1)
     elif url.startswith("postgresql://") and "+psycopg2" not in url:

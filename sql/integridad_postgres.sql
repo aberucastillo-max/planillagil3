@@ -1,5 +1,5 @@
 -- Inmutabilidad a nivel de BASE DE DATOS (defensa adicional a la validación de la API).
--- Ejecutar en Neon DESPUÉS de `python -m app.cli init-db`.
+-- Se ejecuta automáticamente al iniciar la API (es seguro repetirlo).
 CREATE OR REPLACE FUNCTION trg_periodo_cerrado() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE v_pid INT; v_estado TEXT;
 BEGIN
@@ -11,8 +11,11 @@ BEGIN
   RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
 END $$;
 
+DROP TRIGGER IF EXISTS lock_detalle ON planilla_detalle;
 CREATE TRIGGER lock_detalle    BEFORE INSERT OR UPDATE OR DELETE ON planilla_detalle    FOR EACH ROW EXECUTE FUNCTION trg_periodo_cerrado();
+DROP TRIGGER IF EXISTS lock_resultados ON planilla_resultados;
 CREATE TRIGGER lock_resultados BEFORE INSERT OR UPDATE OR DELETE ON planilla_resultados FOR EACH ROW EXECUTE FUNCTION trg_periodo_cerrado();
+DROP TRIGGER IF EXISTS lock_novedades ON novedades;
 CREATE TRIGGER lock_novedades  BEFORE INSERT OR UPDATE OR DELETE ON novedades          FOR EACH ROW EXECUTE FUNCTION trg_periodo_cerrado();
 
 -- El periodo cerrado solo se reabre desde la API (fija app.reapertura = on dentro de la transacción).
@@ -23,4 +26,5 @@ BEGIN
   END IF;
   RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
 END $$;
+DROP TRIGGER IF EXISTS lock_periodo ON periodos;
 CREATE TRIGGER lock_periodo BEFORE UPDATE OR DELETE ON periodos FOR EACH ROW EXECUTE FUNCTION trg_periodo_propio();

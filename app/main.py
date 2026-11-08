@@ -1,11 +1,15 @@
 """Planilla Ágil API v2.  Arranque:  uvicorn app.main:app --host 0.0.0.0 --port $PORT"""
+import html
+import os
+import secrets
+from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 from typing import List
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -17,9 +21,17 @@ from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionar
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
 from .schemas import (AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
                       RentaPreviaIn, SueldoIn, VacacionIn)
-from .security import empresa_actual, get_cuenta
+from .security import empresa_actual, generar_api_key, get_cuenta, hash_key
 
-app = FastAPI(title="Planilla Ágil API", version="2.0.0",
+@asynccontextmanager
+async def _ciclo_de_vida(_):
+    if os.getenv("AUTO_INIT", "1") != "0":
+        from .arranque import preparar_base
+        preparar_base()          # crea tablas, siembra el Diccionario y activa el bloqueo de periodos cerrados
+    yield
+
+
+app = FastAPI(title="Planilla Ágil API", version="2.0.0", lifespan=_ciclo_de_vida,
               description="Motor de nómina peruana (Régimen General) guiado por Diccionario versionado.")
 
 # Solo orígenes explícitos; autenticación por cabecera (no cookies) => sin credenciales cruzadas.
@@ -33,6 +45,48 @@ async def _error_negocio(_, exc: ErrorDeNegocio):
 
 
 API = "/api/v1"
+
+# ------------------------------------------------------------------ página de alta inicial (sin instalar nada)
+_PAGINA = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Planilla Ágil · Crear cuenta</title><body style="font-family:system-ui;background:#0B0F19;color:#e2e8f0;display:flex;justify-content:center;padding:32px">
+<div style="max-width:420px;width:100%;background:#131926;border:1px solid #1E293B;border-radius:20px;padding:28px">{contenido}</div></body></html>"""
+
+
+def _setup_activo() -> str:
+    token = os.getenv("SETUP_TOKEN", "")
+    if not token:
+        raise HTTPException(404, "No disponible.")
+    return token
+
+
+@app.get("/setup", response_class=HTMLResponse, include_in_schema=False)
+def pagina_setup():
+    _setup_activo()
+    return _PAGINA.format(contenido="""<h2 style="margin-top:0">Crear cuenta</h2>
+      <form method="post" action="/setup" style="display:grid;gap:12px">
+      <label>Código de instalación (SETUP_TOKEN)<input name="token" type="password" required style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0B0E17;color:#fff"></label>
+      <label>Nombre de la cuenta<input name="nombre" required style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0B0E17;color:#fff"></label>
+      <label>Plan<select name="plan" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0B0E17;color:#fff"><option>GRATIS</option><option>FREELANCER</option></select></label>
+      <button style="padding:12px;border:0;border-radius:12px;background:#5B46F6;color:#fff;font-weight:700">Crear cuenta y mostrar mi clave</button></form>""")
+
+
+@app.post("/setup", response_class=HTMLResponse, include_in_schema=False)
+def crear_cuenta_inicial(token: str = Form(...), nombre: str = Form(...), plan: str = Form("GRATIS"),
+                         db: Session = Depends(get_db)):
+    esperado = _setup_activo()
+    if not secrets.compare_digest(token.encode(), esperado.encode()):
+        raise HTTPException(403, "Código de instalación incorrecto.")
+    maximos = {"GRATIS": (1, 10), "FREELANCER": (20, 10)}
+    me, mt = maximos.get(plan, maximos["GRATIS"])
+    clave = generar_api_key()
+    db.add(Cuenta(nombre=nombre.strip()[:150], plan=plan if plan in maximos else "GRATIS", max_empresas=me,
+                  max_trabajadores=mt, api_key_hash=hash_key(clave)))
+    db.commit()
+    return _PAGINA.format(contenido=f"""<h2 style="margin-top:0">Cuenta creada ✓</h2>
+      <p>Copie esta clave y guárdela ahora. <b>No se vuelve a mostrar.</b></p>
+      <p style="word-break:break-all;background:#0B0E17;border:1px solid #334155;border-radius:12px;padding:14px;font-family:Consolas,monospace;font-size:15px">{html.escape(clave)}</p>
+      <p style="color:#94a3b8">Péguela en el HTML: engranaje → Clave de API.</p>""")
+
 
 
 def _periodo(db: Session, empresa: Empresa, periodo_id: int) -> Periodo:

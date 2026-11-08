@@ -12,6 +12,16 @@ Python 3.9+ · FastAPI · SQLAlchemy · PostgreSQL (Neon).
 - `sql/integridad_postgres.sql` triggers de inmutabilidad (defensa en la base)
 - `tests/` 16 pruebas (`pytest`)
 
+## Sin instalar nada (recomendado)
+La API prepara sola la base al iniciar (tablas, Diccionario y bloqueo de periodos cerrados).
+En Render defina `DATABASE_URL` y `SETUP_TOKEN` (un código que usted invente). Luego abra
+`https://TU-API.onrender.com/setup`, escriba el código y el nombre, y copie su clave.
+Si la base tiene tablas de la versión anterior, ejecute una vez en Neon > SQL Editor:
+`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
+
+## Configuración rápida (Windows)
+Doble clic en `CONFIGURAR.bat`, pegue la cadena de Neon y copie la clave de `MI_CLAVE.txt`.
+
 ## Local
 ```bash
 pip install -r requirements.txt
