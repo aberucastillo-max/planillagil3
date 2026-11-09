@@ -70,6 +70,9 @@ Al arrancar, la API agrega sola las columnas y los parámetros nuevos (idempoten
 - **Parámetros editables por periodo** (`GET/PUT .../periodos/{id}/parametros`): UIT, RMV, tasas, tope de prima y tasas por AFP. Al abrir un
   mes se heredan los del mes anterior; un periodo CERRADO es de solo lectura.
 
+- **Rentas previas de 5ta categoría** (empleadores anteriores): `GET/POST/PUT/DELETE .../empleados/{id}/rentas-previas-5ta`. El Legajo muestra el
+  historial con totales y permite editar y eliminar; no se duplican registros idénticos y, si un periodo CERRADO ya las incorporó, no se cambian.
+
 ## Administrador del software (pruebas)
 Con el código de instalación (`ADMIN_TOKEN`; si no existe, `SETUP_TOKEN`) se entra como **administrador**: en el engranaje del HTML
 elija «Administrador». Ve todas las cuentas y todos los RUC, crea cuentas (devuelve su clave una sola vez) y empresas en la cuenta que

@@ -340,12 +340,83 @@ def registrar_vacacion(empleado_id: int, data: VacacionIn, empresa: Empresa = De
     return {"ok": True}
 
 
+# ------------------------------------------------------------------ rentas previas de 5ta categoría (empleadores anteriores)
+def _renta_dict(r: RentaPrevia5ta) -> dict:
+    return {"id": r.id, "anio": r.anio, "mes": r.mes, "ruc": r.ruc, "razon_social": r.razon_social,
+            "ingreso_afecto": r.ingreso_afecto, "retencion": r.retencion,
+            "estado": f"INCORPORADO A LA PROYECCIÓN desde {r.mes:02d}/{r.anio}"}
+
+
+def _renta(db: Session, e: Empleado, renta_id: int) -> RentaPrevia5ta:
+    r = db.query(RentaPrevia5ta).filter(RentaPrevia5ta.id == renta_id, RentaPrevia5ta.empleado_id == e.id).first()
+    if not r:
+        raise HTTPException(404, "Renta previa no encontrada.")
+    return r
+
+
+def _exigir_sin_periodos_cerrados(db: Session, empresa: Empresa, anio: int, mes: int):
+    """Una renta previa ya usada en un periodo CERRADO no se cambia: ese periodo quedó con ella incorporada."""
+    cerrado = db.query(Periodo).filter(Periodo.empresa_id == empresa.id, Periodo.estado == "CERRADO", Periodo.anio == anio,
+                                       Periodo.mes >= mes).first()
+    if cerrado:
+        raise HTTPException(403, f"El periodo {cerrado.mes:02d}/{cerrado.anio} está CERRADO y ya incorporó esta renta: "
+                                 "reábralo (con motivo) antes de modificarla o eliminarla.")
+
+
+@app.get(API + "/empresas/{empresa_id}/empleados/{empleado_id}/rentas-previas-5ta")
+def listar_rentas_previas(empleado_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Historial de rentas y retenciones de empleadores anteriores, con sus totales."""
+    e = _empleado(db, empresa, empleado_id)
+    filas = (db.query(RentaPrevia5ta).filter(RentaPrevia5ta.empleado_id == e.id)
+             .order_by(RentaPrevia5ta.anio.desc(), RentaPrevia5ta.mes.desc(), RentaPrevia5ta.id.desc()).all())
+    return {"filas": [_renta_dict(r) for r in filas],
+            "total_ingreso": sum((Decimal(str(r.ingreso_afecto)) for r in filas), Decimal(0)),
+            "total_retencion": sum((Decimal(str(r.retencion)) for r in filas), Decimal(0))}
+
+
 @app.post(API + "/empresas/{empresa_id}/empleados/{empleado_id}/rentas-previas-5ta", status_code=201)
-def registrar_renta_previa(empleado_id: int, data: RentaPreviaIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+def registrar_renta_previa(empleado_id: int, data: RentaPreviaIn, empresa: Empresa = Depends(empresa_actual),
+                           cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
     e = _empleado(db, empresa, empleado_id)
     L.exigir_sin_liquidacion_cerrada(db, e.id, "registrar rentas previas")
-    db.add(RentaPrevia5ta(empleado_id=e.id, anio=data.anio, mes=data.mes, ruc=data.ruc, razon_social=data.razon_social.upper(),
-                          ingreso_afecto=Decimal(str(data.ingreso_afecto)), retencion=Decimal(str(data.retencion))))
+    ing, ret = Decimal(str(data.ingreso_afecto)), Decimal(str(data.retencion))
+    if db.query(RentaPrevia5ta).filter(RentaPrevia5ta.empleado_id == e.id, RentaPrevia5ta.anio == data.anio, RentaPrevia5ta.mes == data.mes,
+                                       RentaPrevia5ta.ruc == data.ruc, RentaPrevia5ta.ingreso_afecto == ing,
+                                       RentaPrevia5ta.retencion == ret).first():
+        raise HTTPException(409, "Esa renta previa ya está registrada (mismo periodo, RUC y montos).")
+    r = RentaPrevia5ta(empleado_id=e.id, anio=data.anio, mes=data.mes, ruc=data.ruc, razon_social=data.razon_social.strip().upper(),
+                       ingreso_afecto=ing, retencion=ret)
+    db.add(r)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="RENTA_PREVIA_REGISTRA", detalle=f"empleado {e.id} {data.mes:02d}/{data.anio} RUC {data.ruc}"))
+    db.commit()
+    return {"ok": True, **_renta_dict(r)}
+
+
+@app.put(API + "/empresas/{empresa_id}/empleados/{empleado_id}/rentas-previas-5ta/{renta_id}")
+def editar_renta_previa(empleado_id: int, renta_id: int, data: RentaPreviaIn, empresa: Empresa = Depends(empresa_actual),
+                        cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    e = _empleado(db, empresa, empleado_id)
+    L.exigir_sin_liquidacion_cerrada(db, e.id, "modificar rentas previas")
+    r = _renta(db, e, renta_id)
+    _exigir_sin_periodos_cerrados(db, empresa, r.anio, r.mes)
+    _exigir_sin_periodos_cerrados(db, empresa, data.anio, data.mes)
+    r.anio, r.mes, r.ruc, r.razon_social = data.anio, data.mes, data.ruc, data.razon_social.strip().upper()
+    r.ingreso_afecto, r.retencion = Decimal(str(data.ingreso_afecto)), Decimal(str(data.retencion))
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="RENTA_PREVIA_EDITA", detalle=f"empleado {e.id} renta {r.id}"))
+    db.commit()
+    return {"ok": True, **_renta_dict(r)}
+
+
+@app.delete(API + "/empresas/{empresa_id}/empleados/{empleado_id}/rentas-previas-5ta/{renta_id}")
+def eliminar_renta_previa(empleado_id: int, renta_id: int, empresa: Empresa = Depends(empresa_actual),
+                          cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    e = _empleado(db, empresa, empleado_id)
+    L.exigir_sin_liquidacion_cerrada(db, e.id, "eliminar rentas previas")
+    r = _renta(db, e, renta_id)
+    _exigir_sin_periodos_cerrados(db, empresa, r.anio, r.mes)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="RENTA_PREVIA_ELIMINA",
+                     detalle=f"empleado {e.id} {r.mes:02d}/{r.anio} RUC {r.ruc} ingreso {r.ingreso_afecto} retención {r.retencion}"))
+    db.delete(r)
     db.commit()
     return {"ok": True}
 

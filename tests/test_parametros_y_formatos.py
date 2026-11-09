@@ -120,3 +120,37 @@ def test_datos_de_la_empresa_y_del_legajo_para_los_formatos(entorno):
     emp = {x["documento"]: x for x in cli.get(f"{B}/empleados", headers=H(clave)).json()}["45678912"]
     assert (emp["area"], emp["centro_costo"], emp["categoria"], emp["calificacion"]) == ("ADMINISTRACION", "000001101 ADMINISTRATIVO", "EMPLEADOS", "CONFIANZA - NO FISCAL")
     assert cli.patch(f"{B}/empleados/{ana}", headers=H(clave), json={"area": "FINANZAS"}).status_code == 200
+
+
+def test_rentas_previas_historial_edicion_y_baja(entorno):
+    cli, nueva = entorno
+    clave, B = _empresa(cli, nueva)
+    ana = _emp(cli, clave, B, "45678912", "Ana")
+    R = f"{B}/empleados/{ana}/rentas-previas-5ta"
+    assert cli.get(R, headers=H(clave)).json() == {"filas": [], "total_ingreso": 0, "total_retencion": 0}
+    a = {"anio": 2026, "mes": 3, "ruc": "20512345678", "razon_social": "logistica integral s.a.c.", "ingreso_afecto": 40000, "retencion": 640.5}
+    r1 = cli.post(R, headers=H(clave), json=a)
+    assert r1.status_code == 201 and r1.json()["razon_social"] == "LOGISTICA INTEGRAL S.A.C." and r1.json()["id"]
+    assert cli.post(R, headers=H(clave), json=a).status_code == 409                              # doble clic: no se duplica
+    assert cli.post(R, headers=H(clave), json={**a, "mes": 5, "ruc": "20100000002", "razon_social": "Otra SAC", "ingreso_afecto": 4000, "retencion": 100}).status_code == 201
+    lista = cli.get(R, headers=H(clave)).json()
+    assert [f["mes"] for f in lista["filas"]] == [5, 3] and D(str(lista["total_ingreso"])) == D("44000") and D(str(lista["total_retencion"])) == D("740.5")
+    assert lista["filas"][1]["estado"].endswith("03/2026")
+    rid = r1.json()["id"]
+    assert cli.put(f"{R}/{rid}", headers=H(clave), json={**a, "ingreso_afecto": 41000}).status_code == 200
+    assert D(str(cli.get(R, headers=H(clave)).json()["total_ingreso"])) == D("45000")
+    # el historial alimenta la 5ta: más renta previa, más retención
+    p = cli.post(f"{B}/periodos", json={"anio": 2026, "mes": 10}, headers=H(clave)).json()["id"]
+    cli.post(f"{B}/planillas/{p}/recalcular", headers=H(clave))
+    con = D(str(DET(cli, clave, B, p, ana).get("@IMP_RENTA_5TA", {"monto": 0})["monto"]))
+    assert cli.delete(f"{R}/{rid}", headers=H(clave)).status_code == 200 and cli.delete(f"{R}/{rid}", headers=H(clave)).status_code == 404
+    cli.post(f"{B}/planillas/{p}/recalcular", headers=H(clave))
+    sin = D(str(DET(cli, clave, B, p, ana).get("@IMP_RENTA_5TA", {"monto": 0})["monto"]))
+    assert con > 0 and sin == 0                                                                  # la renta previa sí cambia la retención
+    # un periodo cerrado que ya la incorporó impide cambiarla
+    nuevo = cli.post(R, headers=H(clave), json=a).json()["id"]
+    cli.post(f"{B}/planillas/{p}/cerrar", headers=H(clave))
+    assert cli.put(f"{R}/{nuevo}", headers=H(clave), json={**a, "retencion": 1}).status_code == 403
+    assert cli.delete(f"{R}/{nuevo}", headers=H(clave)).status_code == 403
+    assert cli.post(R, headers=H(clave), json={**a, "anio": 1999}).status_code == 422
+    assert cli.get(R, headers=H(nueva("Otra"))).status_code == 404

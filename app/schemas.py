@@ -106,10 +106,10 @@ class VacacionIn(BaseModel):
 
 
 class RentaPreviaIn(BaseModel):
-    anio: int
+    anio: int = Field(ge=2020, le=2100)
     mes: int = Field(ge=1, le=12)
     ruc: str = Field(pattern=r"^\d{11}$")
-    razon_social: str
+    razon_social: str = Field(min_length=2, max_length=255)
     ingreso_afecto: float = Field(ge=0)
     retencion: float = Field(ge=0)
 
