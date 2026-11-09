@@ -78,6 +78,11 @@ Al arrancar, la API agrega sola las columnas y los parámetros nuevos (idempoten
   `vac_modo` (FORMULA, CERO, DIAS o MONTO) con `vac_valor`, y `excluir` (claves de conceptos deshabilitados para SIMULAR; una simulación no
   se puede cerrar). Al cerrar solo se guardan la CTS y la decisión de vacaciones pendientes.
 
+- **Una boleta por mes en las acumulaciones.** Cada fase (Fin de Mes, Quincena) calcula el mes completo; la 5ta, los promedios de variables, la
+  última gratificación y la liquidación usan solo el periodo «Fin de Mes» de cada mes (si no existe, el más reciente). Las otras fases se muestran
+  como «NO SE SUMA». El detalle de la renta de 5ta (boletas + rentas previas + conceptos afectos de la liquidación) está en `snapshot.quinta.detalle`,
+  en la pantalla, en el PDF con detalle y en la hoja «Detalle 5ta categoría» del Excel.
+
 ## Administrador del software (pruebas)
 Con el código de instalación (`ADMIN_TOKEN`; si no existe, `SETUP_TOKEN`) se entra como **administrador**: en el engranaje del HTML
 elija «Administrador». Ve todas las cuentas y todos los RUC, crea cuentas (devuelve su clave una sola vez) y empresas en la cuenta que
