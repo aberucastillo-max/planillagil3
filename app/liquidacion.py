@@ -326,7 +326,13 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     afecta = lambda f, flag: f["habilitado"] and f["categoria"] == "INGRESO" and getattr(pr.conceptos[f["codigo"]], flag)
     base_afp = sum((f["monto"] for f in filas if afecta(f, "afecta_afp_onp")), CERO)
     base_ess = sum((f["monto"] for f in filas if afecta(f, "afecta_essalud")), CERO)
-    base_5ta = sum((f["monto"] for f in filas if afecta(f, "afecta_5ta_regular")), CERO)
+    
+    # CORRECCIÓN DE DUPLICIDAD DE 5TA CATEGORÍA EN EL MES DE CESE:
+    # La base afectta de 5ta de la liquidación solo debe considerar los conceptos truncos y extraordinarios 
+    # (CTS, Grati, Vacaciones, Indemnización), aislando la remuneración ordinaria mensual del mes de cese 
+    # que ya está declarada y retenida dentro del Resultado regular de la boleta mensual (`res.remuneracion_computable`).
+    base_5ta_bruta = sum((f["monto"] for f in filas if afecta(f, "afecta_5ta_regular")), CERO)
+    base_5ta = max(CERO, base_5ta_bruta - D(res.remuneracion_computable))
 
     # ---- aportes de pensión sobre lo afecto, con el tope de la prima aplicado una sola vez sobre la base del mes
     pension = {"tipo": emp.sistema_pensionario, "base": _f(base_afp)}
