@@ -59,6 +59,17 @@ Al arrancar, la API agrega sola las columnas y los parámetros nuevos (idempoten
   `revertir` y `exportar` (Excel). Lo depositado no se recalcula y se da por pagado en la liquidación posterior.
 - **Reingreso:** `POST /empresas/{id}/empleados/{id}/reingreso` abre un nuevo ciclo y conserva el historial (`GET .../vinculos`).
 
+## Liquidación, formatos y parámetros (etapa 4)
+- **La liquidación no se guarda como borrador.** `GET .../liquidaciones/vista`, `.../pdf` y `.../excel` la calculan al momento. Solo
+  `POST .../liquidaciones/cerrar` la guarda, y **solo lo cerrado** viaja al AFPnet, al PLAME y a los resúmenes. `POST .../{id}/reabrir`
+  (con motivo) anula el cierre. Al arrancar se eliminan los borradores ABIERTA de versiones anteriores.
+- **Formatos de la empresa:** PDF de la liquidación (una hoja; BORRADOR si no está cerrada), Excel de la liquidación y boletas mensuales en
+  PDF (`.../planillas/{id}/boletas/pdf`, dos copias por hoja). Salen de los datos del legajo y de `PATCH /empresas/{id}` (dirección, representante).
+- **AFP:** tasa de comisión por saldo y componente mensual de la mixta en las tasas oficiales; cada trabajador tiene su `tipo_comision`
+  (FLUJO o MIXTA) y eso define lo que se descuenta en la boleta y en la liquidación.
+- **Parámetros editables por periodo** (`GET/PUT .../periodos/{id}/parametros`): UIT, RMV, tasas, tope de prima y tasas por AFP. Al abrir un
+  mes se heredan los del mes anterior; un periodo CERRADO es de solo lectura.
+
 ## Administrador del software (pruebas)
 Con el código de instalación (`ADMIN_TOKEN`; si no existe, `SETUP_TOKEN`) se entra como **administrador**: en el engranaje del HTML
 elija «Administrador». Ve todas las cuentas y todos los RUC, crea cuentas (devuelve su clave una sola vez) y empresas en la cuenta que

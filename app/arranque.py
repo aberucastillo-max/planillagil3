@@ -24,9 +24,25 @@ def preparar_base():
             c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_contrato VARCHAR(12) NOT NULL DEFAULT 'INDEFINIDO'"))
             c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS fecha_fin_contrato DATE"))
             c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS clase_despido VARCHAR(12)"))
+            for col, tipo in (("area", "VARCHAR(100)"), ("centro_costo", "VARCHAR(100)"), ("categoria", "VARCHAR(30) DEFAULT 'EMPLEADOS'"),
+                              ("calificacion", "VARCHAR(60)")):
+                c.execute(text(f"ALTER TABLE empleados ADD COLUMN IF NOT EXISTS {col} {tipo}"))
+            c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_comision VARCHAR(6) NOT NULL DEFAULT 'FLUJO'"))
+            c.execute(text("ALTER TABLE diccionario_afp ADD COLUMN IF NOT EXISTS comision_mixta_flujo NUMERIC(7,4) NOT NULL DEFAULT 0"))
+            c.execute(text("ALTER TABLE diccionario_afp ADD COLUMN IF NOT EXISTS comision_saldo NUMERIC(7,4) NOT NULL DEFAULT 0"))
+            for col, tipo in (("direccion_fiscal", "VARCHAR(255)"), ("representante_legal", "VARCHAR(150)"), ("cargo_representante", "VARCHAR(100)")):
+                c.execute(text(f"ALTER TABLE empresas ADD COLUMN IF NOT EXISTS {col} {tipo}"))
     db = SessionLocal()
     try:
         sembrar_rg728(db)
+        # Desde la etapa 4 la liquidación NO se guarda como borrador: solo existe cerrada. Se limpian los borradores antiguos.
+        if "liquidaciones" in set(inspect(engine).get_table_names()):
+            ids = [r[0] for r in db.execute(text("SELECT id FROM liquidaciones WHERE estado = 'ABIERTA'"))]
+            if ids:
+                lista = ",".join(str(i) for i in ids)
+                db.execute(text(f"DELETE FROM liquidacion_detalle WHERE liquidacion_id IN ({lista})"))
+                db.execute(text(f"DELETE FROM liquidaciones WHERE id IN ({lista})"))
+                db.commit()
     finally:
         db.close()
     if engine.dialect.name == "postgresql" and os.path.exists(SQL_INTEGRIDAD):

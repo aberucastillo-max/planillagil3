@@ -70,7 +70,7 @@ def _previos_5ta(db, emp, periodo):
 def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
     exigir_abierto(periodo)
     dic = db.get(Diccionario, periodo.diccionario_id)
-    pr: ParametrosPeriodo = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio)
+    pr: ParametrosPeriodo = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, periodo_id=periodo.id)
     fi, ff = periodo.fecha_inicio, periodo.fecha_fin
     base = int(pr["BASE_DIAS"])
 
@@ -204,9 +204,10 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
             if afp is None:
                 raise ErrorDeNegocio(f"{nombre}: AFP '{emp.afp_nombre}' no existe en el Diccionario.", 422)
             tope_prima = pr.p.get("RMA_PRIMA", afp.tope_prima)        # remuneración máxima asegurable vigente (Diccionario)
-            ap, co, pri = R.calcular_afp(base_prev, afp.aporte, afp.comision, afp.prima, tope_prima)
+            com = afp.comision_planilla(emp.tipo_comision)       # flujo, o el componente mensual de la mixta (la de saldo la cobra la AFP)
+            ap, co, pri = R.calcular_afp(base_prev, afp.aporte, com, afp.prima, tope_prima)
             add("@FONDO_PENSIONES", ap, f"{base_prev} x {afp.aporte}")
-            add("@COMISION_VARIABLE", co, f"{base_prev} x {afp.comision}")
+            add("@COMISION_VARIABLE", co, f"{base_prev} x {com}" + (" (comisión mixta: componente mensual)" if emp.tipo_comision == "MIXTA" else " (comisión sobre flujo)"))
             add("@SEGURO_INVALIDEZ", pri, f"min({base_prev}, tope {tope_prima}) x {afp.prima}")
             if not emp.cuspp:
                 alertas.append(f"{nombre}: falta CUSPP (AFPnet).")

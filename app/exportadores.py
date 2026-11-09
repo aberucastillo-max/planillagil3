@@ -120,6 +120,6 @@ def plame_zip(db: Session, empresa: Empresa, periodo: Periodo):
 
 
 def avisos_consolidacion(db: Session, periodo: Periodo):
-    """Liquidaciones ABIERTAS del periodo: no entran al consolidado hasta cerrarse."""
-    cerradas, abiertas = L.consolidado(db, periodo)
-    return {"incluidas": len(cerradas), "abiertas": abiertas}
+    """Solo entra lo CERRADO. Se avisa de los cesados del periodo cuya liquidación aún no está cerrada."""
+    cerradas, sin_cerrar = L.consolidado(db, periodo)
+    return {"incluidas": len(cerradas), "abiertas": sin_cerrar}

@@ -96,9 +96,7 @@ def test_cts_depositada_marca_como_pagada_la_cts_anterior_de_la_liquidacion(ento
     cli.post(f"{B}/cts-semestral/depositar", headers=H(clave), json={"anio": 2026, "semestre": "NOV", "fecha_deposito": "2026-11-12"})
     cli.post(f"{B}/empleados/{beto}/baja", headers=H(clave), json={"fecha_cese": "2026-11-10", "motivo": "01"})
     cli.post(f"{B}/planillas/{pids[11]}/recalcular", headers=H(clave))
-    r = cli.post(f"{B}/liquidaciones", headers=H(clave), json={"periodo_id": pids[11], "empleado_ids": [beto]}).json()
-    assert r["errores"] == [], r
-    v = cli.get(f"{B}/liquidaciones/{r['procesadas'][0]['liquidacion_id']}", headers=H(clave)).json()
+    v = cli.get(f"{B}/liquidaciones/vista?periodo_id={pids[11]}&empleado_id={beto}", headers=H(clave)).json()
     assert v["cts_anterior_pagada"] is True and v["puede_cerrar"]                       # no hubo que responder la casilla
     assert any("DEPOSITADA" in a for a in v["avisos"])
     assert [c["codigo"] for c in v["conceptos"]].count("@CTS_TRUNCA") == 1               # solo la del semestre en curso
@@ -107,10 +105,9 @@ def test_cts_depositada_marca_como_pagada_la_cts_anterior_de_la_liquidacion(ento
 def test_reingreso_abre_un_nuevo_ciclo_y_conserva_el_historial(entorno):
     cli, nueva = entorno
     clave, B, ana, luis, pids = _escenario(cli, nueva)
-    lid = cli.post(f"{B}/liquidaciones", headers=H(clave), json={"periodo_id": pids[10], "empleado_ids": [ana], "cts_anterior_pagada": True}).json()["procesadas"][0]["liquidacion_id"]
-    # con la liquidación ABIERTA no se puede reingresar; el ingreso debe ser posterior al cese
-    assert cli.post(f"{B}/empleados/{ana}/reingreso", headers=H(clave), json={"fecha_ingreso": "2026-11-02"}).status_code == 409
-    cli.post(f"{B}/liquidaciones/{lid}/cerrar", headers=H(clave))
+    # ver la liquidación (sin guardar) no impide el reingreso; el ingreso debe ser posterior al cese
+    cli.get(f"{B}/liquidaciones/vista?periodo_id={pids[10]}&empleado_id={ana}&cts_anterior_pagada=true", headers=H(clave))
+    cli.post(f"{B}/liquidaciones/cerrar", headers=H(clave), json={"periodo_id": pids[10], "empleado_id": ana, "cts_anterior_pagada": True})
     assert cli.post(f"{B}/empleados/{ana}/reingreso", headers=H(clave), json={"fecha_ingreso": "2026-10-20"}).status_code == 422
     assert cli.post(f"{B}/empleados/{ana}/sueldos", headers=H(clave), json={"monto": 3500, "fecha_vigencia": "2026-11-02"}).status_code == 403
     r = cli.post(f"{B}/empleados/{ana}/reingreso", headers=H(clave), json={"fecha_ingreso": "2026-11-02", "sueldo_basico": 3500})

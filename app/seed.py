@@ -90,6 +90,10 @@ SUSPENSIONES = [  # códigos tal como figuran en el Registro Maestro; validar co
 ]
 
 
+# comisión anual sobre saldo (SBS, octubre de 2026; POR VALIDAR). El componente mensual de la mixta es 0 % para las cuatro desde 2023.
+AFP_SALDO = {"HABITAT": "0.0125", "INTEGRA": "0.0078", "PRIMA": "0.0125", "PROFUTURO": "0.0068"}
+
+
 def sembrar_rg728(db: Session) -> Diccionario:
     dic = db.query(Diccionario).filter_by(codigo="RG_728", version=1).first()
     if dic:
@@ -102,7 +106,8 @@ def sembrar_rg728(db: Session) -> Diccionario:
         db.add(DiccionarioParametro(diccionario_id=dic.id, clave=clave, valor=Decimal(valor), vigente_desde=DESDE, nota=nota))
     for n, ap, co, pr, tp in AFPS:
         db.add(DiccionarioAFP(diccionario_id=dic.id, nombre=n, aporte=Decimal(ap), comision=Decimal(co),
-                              prima=Decimal(pr), tope_prima=Decimal(tp), vigente_desde=DESDE))
+                              prima=Decimal(pr), tope_prima=Decimal(tp), vigente_desde=DESDE,
+                              comision_mixta_flujo=Decimal("0"), comision_saldo=Decimal(AFP_SALDO[n])))
     for d, h, t in ESCALA_5TA:
         db.add(DiccionarioEscala5ta(diccionario_id=dic.id, desde_uit=Decimal(d),
                                     hasta_uit=Decimal(h) if h else None, tasa=Decimal(t)))
@@ -143,6 +148,7 @@ CONCEPTOS_LIQUIDACION = [
     ("@VACACIONES_VENCIDAS", "Vacaciones vencidas no gozadas", "INGRESO", "FORMULA", True, 1, 1, 0, 1, "0118"),
     ("@VACACIONES_TRUNCAS", "Vacaciones truncas", "INGRESO", "FORMULA", True, 1, 1, 0, 1, "0118"),
     ("@INDEMNIZACION_DESPIDO", "Indemnización por despido arbitrario", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
+    ("@DEVOLUCION_5TA", "Devolución de retención de 5ta categoría", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
 ]
 
 
@@ -157,6 +163,9 @@ def completar_rg728(db: Session) -> None:
         if (clave, desde) not in existentes:
             db.add(DiccionarioParametro(diccionario_id=dic.id, clave=clave, valor=Decimal(valor),
                                         vigente_desde=desde, vigente_hasta=hasta, nota=nota))
+    for a in db.query(DiccionarioAFP).filter(DiccionarioAFP.diccionario_id == dic.id):
+        if (a.comision_saldo or 0) == 0 and a.nombre.upper() in AFP_SALDO:          # bases creadas antes de esta columna
+            a.comision_saldo = Decimal(AFP_SALDO[a.nombre.upper()])
     codigos = {c.codigo for c in db.query(Concepto).filter(Concepto.diccionario_id == dic.id)}
     for cod, desc, cat, nat, calc, afp, r5, d5, ess, plame in CONCEPTOS_LIQUIDACION:
         if cod not in codigos:

@@ -40,6 +40,9 @@ class Empresa(Base):
     cuenta_id = Column(Integer, ForeignKey("cuentas.id"), nullable=False, index=True)
     ruc = Column(String(11), nullable=False)
     razon_social = Column(String(255), nullable=False)
+    direccion_fiscal = Column(String(255))
+    representante_legal = Column(String(150))
+    cargo_representante = Column(String(100))
     diccionario_id = Column(Integer, ForeignKey("diccionarios.id"), nullable=False)
     creado_en = Column(DateTime(timezone=True), default=_now)
     __table_args__ = (UniqueConstraint("cuenta_id", "ruc", name="uq_empresa_cuenta_ruc"),)
@@ -87,6 +90,8 @@ class DiccionarioAFP(Base):
     aporte = Column(Numeric(7, 4), nullable=False)
     comision = Column(Numeric(7, 4), nullable=False)
     prima = Column(Numeric(7, 4), nullable=False)
+    comision_mixta_flujo = Column(Numeric(7, 4), nullable=False, default=0)   # componente mensual de la comisión mixta (0 % desde 2023)
+    comision_saldo = Column(Numeric(7, 4), nullable=False, default=0)         # comisión anual sobre el saldo (la cobra la AFP, no va en planilla)
     tope_prima = Column(Numeric(12, 2))
     vigente_desde = Column(Date, nullable=False)
     vigente_hasta = Column(Date)
@@ -155,6 +160,11 @@ class Empleado(Base):
     tipo_contrato = Column(String(12), nullable=False, default="INDEFINIDO")   # INDEFINIDO | PLAZO_FIJO
     fecha_fin_contrato = Column(Date)                                          # solo plazo fijo
     clase_despido = Column(String(12))                                         # JUSTIFICADO | ARBITRARIO | NULO (si el motivo es 02)
+    area = Column(String(100))
+    centro_costo = Column(String(100))
+    categoria = Column(String(30), default="EMPLEADOS")
+    calificacion = Column(String(60))
+    tipo_comision = Column(String(6), nullable=False, default="FLUJO")      # FLUJO | MIXTA (comisión por saldo): define la comisión de planilla
     __table_args__ = (
         UniqueConstraint("empresa_id", "tipo_documento", "documento_identidad", name="uq_emp_doc"),
         Index("ix_emp_empresa", "empresa_id", "estado"),
@@ -350,3 +360,27 @@ class Vinculo(Base):
     motivo_cese = Column(String(5))
     clase_despido = Column(String(12))
     creado_en = Column(DateTime(timezone=True), default=_now)
+
+
+class PeriodoParametro(Base):
+    """Valores del periodo que el usuario edita (UIT, RMV, tasas...). Se arrastran de un mes al siguiente al abrirlo."""
+    __tablename__ = "periodo_parametros"
+    id = Column(Integer, primary_key=True)
+    periodo_id = Column(Integer, ForeignKey("periodos.id"), nullable=False, index=True)
+    clave = Column(String(40), nullable=False)
+    valor = Column(Numeric(14, 6), nullable=False)
+    __table_args__ = (UniqueConstraint("periodo_id", "clave", name="uq_periodo_param"),)
+
+
+class PeriodoAFP(Base):
+    """Tasas oficiales por AFP del periodo (editables). Se arrastran al abrir el mes siguiente."""
+    __tablename__ = "periodo_afp"
+    id = Column(Integer, primary_key=True)
+    periodo_id = Column(Integer, ForeignKey("periodos.id"), nullable=False, index=True)
+    nombre = Column(String(30), nullable=False)
+    aporte = Column(Numeric(7, 4), nullable=False)
+    comision = Column(Numeric(7, 4), nullable=False)
+    comision_mixta_flujo = Column(Numeric(7, 4), nullable=False, default=0)
+    comision_saldo = Column(Numeric(7, 4), nullable=False, default=0)
+    prima = Column(Numeric(7, 4), nullable=False)
+    __table_args__ = (UniqueConstraint("periodo_id", "nombre", name="uq_periodo_afp"),)

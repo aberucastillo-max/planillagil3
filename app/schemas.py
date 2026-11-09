@@ -12,6 +12,9 @@ class EmpresaIn(BaseModel):
     razon_social: str = Field(min_length=2, max_length=255)
     diccionario_codigo: str = "RG_728"
     cuenta_id: Optional[int] = None        # solo lo usa el administrador, para elegir la cuenta dueña
+    direccion_fiscal: Optional[str] = None
+    representante_legal: Optional[str] = None
+    cargo_representante: Optional[str] = None
 
 
 class EmpleadoIn(BaseModel):
@@ -32,9 +35,16 @@ class EmpleadoIn(BaseModel):
     cobertura_eps: bool = False
     tipo_contrato: str = "INDEFINIDO"
     fecha_fin_contrato: Optional[date] = None
+    area: Optional[str] = None
+    centro_costo: Optional[str] = None
+    categoria: Optional[str] = "EMPLEADOS"
+    calificacion: Optional[str] = None
+    tipo_comision: str = "FLUJO"
 
     @model_validator(mode="after")
     def _validar(self):
+        if self.tipo_comision not in ("FLUJO", "MIXTA"):
+            raise ValueError("tipo_comision debe ser FLUJO o MIXTA.")
         if self.tipo_contrato not in TIPOS_CONTRATO:
             raise ValueError("tipo_contrato debe ser INDEFINIDO o PLAZO_FIJO.")
         if self.tipo_contrato == "PLAZO_FIJO" and not self.fecha_fin_contrato:
@@ -133,6 +143,18 @@ class EmpleadoPatch(BaseModel):
     tipo_contrato: Optional[str] = None
     fecha_fin_contrato: Optional[date] = None
     clase_despido: Optional[str] = None
+    area: Optional[str] = None
+    centro_costo: Optional[str] = None
+    categoria: Optional[str] = None
+    calificacion: Optional[str] = None
+    tipo_comision: Optional[str] = None
+
+    @field_validator("tipo_comision")
+    @classmethod
+    def _tcom(cls, v):
+        if v is not None and v not in ("FLUJO", "MIXTA"):
+            raise ValueError("tipo_comision debe ser FLUJO o MIXTA.")
+        return v
 
     @field_validator("tipo_contrato")
     @classmethod
@@ -156,14 +178,17 @@ class EmpleadoPatch(BaseModel):
         return v
 
 
-class LiquidacionProcesarIn(BaseModel):
+class LiquidacionCerrarIn(BaseModel):
     periodo_id: int
-    empleado_ids: List[int] = Field(min_length=1)
+    empleado_id: int
     cts_anterior_pagada: Optional[bool] = None
 
 
-class LiquidacionPatchIn(BaseModel):
-    cts_anterior_pagada: bool
+class EmpresaPatch(BaseModel):
+    razon_social: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    direccion_fiscal: Optional[str] = None
+    representante_legal: Optional[str] = None
+    cargo_representante: Optional[str] = None
 
 
 class CtsCalcularIn(BaseModel):
@@ -195,3 +220,8 @@ class CuentaPatch(BaseModel):
     max_empresas: Optional[int] = Field(default=None, ge=1, le=1000)
     max_trabajadores: Optional[int] = Field(default=None, ge=1, le=100000)
     activa: Optional[bool] = None
+
+
+class ParametrosPeriodoIn(BaseModel):
+    parametros: dict = Field(default_factory=dict)
+    afps: List[dict] = Field(default_factory=list)

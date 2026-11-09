@@ -1,7 +1,5 @@
-"""PDF de la liquidación por cese (un PDF por liquidación).
-Contenido de la propuesta: empresa y RUC, datos del colaborador, fechas de ingreso y cese, tiempo de servicio, motivo,
-detalle de conceptos con sus montos, descuentos y neto. Opciones (por confirmar en la propuesta): fórmulas y firmas.
-Una liquidación ABIERTA sale marcada como BORRADOR."""
+"""PDF y Excel de la LIQUIDACIÓN DE BENEFICIOS SOCIALES, imitando el formato de la empresa (modelo entregado por el dueño).
+Una liquidación sin cerrar sale marcada como BORRADOR. Los datos salen del legajo, el cálculo y la empresa."""
 import io
 from decimal import Decimal
 
@@ -9,91 +7,278 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
 
-MOTIVOS = {"01": "Renuncia", "02": "Despido", "03": "Mutuo disenso", "04": "Vencimiento de contrato",
-           "05": "Invalidez absoluta", "06": "Jubilación", "07": "Fallecimiento", "08": "Cese colectivo"}
-CLASES = {"JUSTIFICADO": "justificado", "ARBITRARIO": "arbitrario", "NULO": "nulo"}
+from . import reglas as R
+from .formatos import a_fecha, dmy, fecha_larga, monto, motivo_texto, regimen_pensiones
+from .letras import monto_en_letras
 
-
-def _s(monto) -> str:
-    return f"{Decimal(monto):,.2f}"
-
-
-def _fecha(f) -> str:
-    return f"{f.day:02d}/{f.month:02d}/{f.year}" if hasattr(f, "day") else str(f)
+GRIS = colors.HexColor("#BDBDBD")
+GRIS_CLARO = colors.HexColor("#E6E6E6")
 
 
-def _iso(texto: str) -> str:
-    partes = str(texto).split("-")
-    return f"{partes[2]}/{partes[1]}/{partes[0]}" if len(partes) == 3 else str(texto)
+def _d(x) -> Decimal:
+    return Decimal(str(x or 0))
 
 
-def generar(empresa, liq, detalle, descripciones, con_formulas=True, con_firmas=False) -> bytes:
-    snap = liq.snapshot or {}
+def _tiempo_formato(snap) -> str:
+    y, m, d = R.tiempo_servicio(a_fecha(snap["fecha_ingreso"]), a_fecha(snap["fecha_cese"]))
+    return f"{y:02d} Años, {m:02d} Meses y {d:02d} Dias"
+
+
+def _por_codigo(doc, *codigos):
+    return [c for c in doc["conceptos"] if c["codigo"] in codigos]
+
+
+def _marca_agua(doc):
+    def f(canvas, _):
+        if doc["estado"] != "CERRADA":
+            canvas.saveState()
+            canvas.setFont("Helvetica-Bold", 70)
+            canvas.setFillColorRGB(0.88, 0.88, 0.88)
+            canvas.translate(105 * mm, 120 * mm)
+            canvas.rotate(45)
+            canvas.drawCentredString(0, 0, "BORRADOR")
+            canvas.restoreState()
+    return f
+
+
+def generar_pdf(empresa, doc: dict, con_formulas: bool = False, con_firmas: bool = True) -> bytes:
+    snap = doc["snapshot"]
     st = getSampleStyleSheet()
-    pequeno = ParagraphStyle("p", parent=st["BodyText"], fontSize=8, leading=10, textColor=colors.HexColor("#444444"))
-    normal = ParagraphStyle("n", parent=st["BodyText"], fontSize=9, leading=11)
+    n8 = ParagraphStyle("n8", parent=st["BodyText"], fontSize=7.8, leading=8.8)
+    n8b = ParagraphStyle("n8b", parent=n8, fontName="Helvetica-Bold")
+    pq = ParagraphStyle("pq", parent=n8, fontSize=7, leading=8.4, textColor=colors.HexColor("#444444"))
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm,
-                            bottomMargin=16 * mm, title="Liquidación de beneficios sociales")
+    pdf = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=8 * mm, bottomMargin=8 * mm,
+                            title="Liquidación de beneficios sociales")
+    W = 182 * mm
     el = []
-    if liq.estado != "CERRADA":
-        el.append(Paragraph("<font color='#B45309'><b>BORRADOR · liquidación abierta, no es un documento definitivo</b></font>", normal))
-        el.append(Spacer(1, 4))
-    el.append(Paragraph("<b>LIQUIDACIÓN DE BENEFICIOS SOCIALES</b>", ParagraphStyle("t", parent=st["Title"], fontSize=15)))
-    el.append(Paragraph(f"{empresa.razon_social} · RUC {empresa.ruc}", normal))
-    el.append(Spacer(1, 6))
+    if doc["estado"] != "CERRADA":
+        el.append(Paragraph("<font color='#B45309'><b>BORRADOR · liquidación sin cerrar: no se guarda ni viaja al PLAME, AFP o resúmenes hasta cerrarla.</b></font>", n8))
+    el += [Paragraph(f"<b>{empresa.razon_social}</b>", ParagraphStyle("e", parent=n8, fontSize=11, leading=13)),
+           Paragraph(f"DIRECCION : {empresa.direccion_fiscal}" if empresa.direccion_fiscal else "", n8),
+           Paragraph(f"R.U.C. : {empresa.ruc}", n8), Spacer(1, 5),
+           Paragraph("<u><b>LIQUIDACION DE BENEFICIOS SOCIALES</b></u>", ParagraphStyle("t", parent=n8, fontSize=11, alignment=1, leading=13)),
+           Spacer(1, 6), Paragraph(f"<b>FECHA</b>&nbsp;&nbsp;&nbsp;{fecha_larga(snap['fecha_cese'])}", ParagraphStyle("f", parent=n8, fontSize=9)),
+           Spacer(1, 5), Paragraph("<u><b>DATOS DEL TRABAJADOR</b></u>", n8)]
 
-    motivo = MOTIVOS.get(liq.motivo_cese or "", liq.motivo_cese or "—")
-    if liq.clase_despido:
-        motivo += f" ({CLASES.get(liq.clase_despido, liq.clase_despido)})"
-    datos = [
-        ["Colaborador", snap.get("colaborador", "")], ["Documento", snap.get("documento", "")],
-        ["Puesto", snap.get("puesto") or "—"], ["Fecha de ingreso", _iso(snap.get("fecha_ingreso", ""))],
-        ["Fecha de cese", _fecha(liq.fecha_cese)], ["Tiempo de servicio", snap.get("tiempo_servicio", "")],
-        ["Motivo de cese", motivo], ["Remuneración computable", f"S/ {_s(snap.get('remuneracion_computable', 0))}"],
-    ]
-    t = Table(datos, colWidths=[45 * mm, 125 * mm])
-    t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#555555")),
-                           ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDDDDD")),
-                           ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
-    el += [t, Spacer(1, 8)]
+    izq = [f"APELLIDOS, NOMBRES : {snap['colaborador'].replace(', ', ' ', 1)}", f"CODIGO : {snap['documento']}",
+           f"FECHA DE INGRESO : {dmy(snap['fecha_ingreso'])}", f"MOTIVO DE RETIRO : {motivo_texto(doc.get('motivo_cese'), doc.get('clase_despido'))}",
+           f"TIEMPO DE SERVICIOS EN LA EMPRESA : {_tiempo_formato(snap)}"]
+    der = [f"UNIDAD : {snap.get('sede') or ''}", f"PLANILLA : {snap.get('categoria') or ''}", f"FECHA DE EGRESO : {dmy(snap['fecha_cese'])}",
+           f"PUESTO DE TRABAJO : {(snap.get('puesto') or '')}", f"REGIMEN PENSIONES : {regimen_pensiones(snap)}"]
+    t = Table([[Paragraph(a, n8), Paragraph(b, n8)] for a, b in zip(izq, der)], colWidths=[W * 0.55, W * 0.45])
+    t.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 0.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.5), ("LINEBELOW", (0, -1), (-1, -1), 0.5, colors.black)]))
+    el += [t, Spacer(1, 4)]
 
-    def bloque(titulo, categoria, signo=""):
-        filas = [d for d in detalle if d.categoria == categoria]
-        if not filas:
-            return
-        cab = ["Concepto", "Cálculo", "Monto (S/)"] if con_formulas else ["Concepto", "Monto (S/)"]
-        data = [cab]
-        for d in filas:
-            nombre = descripciones.get(d.concepto_codigo, d.concepto_codigo)
-            if con_formulas:
-                data.append([Paragraph(nombre, normal), Paragraph(d.formula or "", pequeno), signo + _s(d.monto)])
-            else:
-                data.append([Paragraph(nombre, normal), signo + _s(d.monto)])
-        anchos = [55 * mm, 90 * mm, 25 * mm] if con_formulas else [135 * mm, 35 * mm]
-        tb = Table(data, colWidths=anchos, repeatRows=1)
-        tb.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EAF6")), ("FONTSIZE", (0, 0), (-1, 0), 9),
-                                ("ALIGN", (-1, 0), (-1, -1), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                                ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDDDDD"))]))
-        el.extend([Paragraph(f"<b>{titulo}</b>", normal), Spacer(1, 2), tb, Spacer(1, 6)])
+    # ---- remuneración computable
+    sueldo, af, var = _d(snap["sueldo"]), _d(snap["asignacion_familiar"]), _d(snap["variables_promedio"])
+    sexto, rc_cts = _d(snap["sexto_gratificacion"]), _d(snap["rc_cts"])
+    rc = sueldo + af + var
+    pend = _d((snap.get("cts_anterior") or {}).get("rc", 0))
+    filas = [["REMUNERACION COMPUTABLE", "C.T.S.", "C.T.S. Pendiente", "Gratificación", "Vacaciones"],
+             ["SEXTO GRATIFICACION", monto(sexto), "0.00", "", ""],
+             ["SUELDO BASICO", monto(sueldo), "0.00", monto(sueldo), monto(sueldo)]]
+    if af:
+        filas.append(["ASIGNACION FAMILIAR", monto(af), "0.00", monto(af), monto(af)])
+    if var:
+        filas.append(["PROMEDIO DE VARIABLES", monto(var), "0.00", monto(var), monto(var)])
+    filas.append(["TOTAL REMUNERACION COMPUTABLE", monto(rc_cts), monto(pend), monto(rc), monto(rc)])
+    t = Table(filas, colWidths=[W * 0.40, W * 0.15, W * 0.15, W * 0.15, W * 0.15])
+    t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 8), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                           ("ALIGN", (1, 0), (-1, -1), "RIGHT"), ("LINEABOVE", (0, -1), (-1, -1), 0.6, colors.black),
+                           ("TOPPADDING", (0, 0), (-1, -1), 0.4), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.4)]))
+    el += [t, Spacer(1, 2)]
+    caja = Table([[f"REMUNERACION COMPUTABLE PARA CTS:   Por Año : {monto(rc_cts)}", f"Por Mes : {monto(rc_cts / 12)}", f"Por Día : {monto(rc_cts / 360)}"]],
+                 colWidths=[W * 0.5, W * 0.25, W * 0.25])
+    caja.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.6, colors.black), ("FONTSIZE", (0, 0), (-1, -1), 8), ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold")]))
+    el += [caja, Spacer(1, 4)]
 
-    bloque("INGRESOS", "INGRESO")
-    bloque("DESCUENTOS", "DESCUENTO")
-    tot = Table([["Total ingresos", _s(liq.total_ingresos)], ["Total descuentos", _s(liq.total_descuentos)],
-                 ["NETO A PAGAR (S/)", _s(liq.neto_a_pagar)]], colWidths=[135 * mm, 35 * mm])
-    tot.setStyle(TableStyle([("ALIGN", (1, 0), (1, -1), "RIGHT"), ("FONTNAME", (0, 2), (-1, 2), "Helvetica-Bold"),
-                             ("FONTSIZE", (0, 2), (-1, 2), 11), ("LINEABOVE", (0, 2), (-1, 2), 0.8, colors.black)]))
-    el.append(tot)
-    if liq.avisos:
-        el += [Spacer(1, 8), Paragraph("<b>Observaciones</b>", normal)] + [Paragraph("• " + a, pequeno) for a in liq.avisos]
-    if float(liq.ret_5ta_ajuste or 0) < 0:
-        el.append(Paragraph("• El descuento de quinta categoría es negativo: es la devolución del exceso retenido.", pequeno))
+    def barra(titulo, derecha=None, grande=False):
+        t = Table([[titulo, derecha or ""]], colWidths=[W * 0.7, W * 0.3])
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), GRIS), ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+                               ("FONTSIZE", (0, 0), (-1, -1), 12 if grande else 9), ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                               ("TOPPADDING", (0, 0), (-1, -1), 1.2), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.2)]))
+        return t
+
+    def tabla(filas, estilos=()):
+        t = Table(filas, colWidths=[W * 0.42, W * 0.22, W * 0.18, W * 0.18])
+        t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 8), ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+                               ("TOPPADDING", (0, 0), (-1, -1), 0.4), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.4), *estilos]))
+        return t
+
+    # ---- INGRESOS
+    el.append(barra("INGRESOS"))
+    f, est = [], []
+
+    def titulo(t):
+        f.append([t, "", "", ""])
+        est.append(("FONTNAME", (0, len(f) - 1), (0, len(f) - 1), "Helvetica-Bold"))
+
+    cts = _por_codigo(doc, "@CTS_TRUNCA")
+    c = snap.get("cts")
+    ant = snap.get("cts_anterior")
+    if c or ant:
+        titulo("COMPENSACIÓN POR TIEMPO DE SERVICIO :")
+    if c:
+        f.append([f"Ultimo Periodo de C.T.S. por cancelar : {dmy(c['desde'])} al {dmy(c['hasta'])}", "", "", ""])
+        f.append([f"   {int(c['meses']):02d} Dozavos", f"x S/. {c['por_mes']}", monto(c["monto_meses"]), ""])
+        f.append([f"   {int(c['dias']):02d} Treintavos de Dozavo", f"x S/. {c['por_dia']}", monto(c["monto_dias"]), monto(_d(c["monto_meses"]) + _d(c["monto_dias"]))])
+    if ant:
+        rc_a = _d(ant["rc"])
+        f.append([f"C.T.S. Pendiente : {dmy(ant['desde'])} al {dmy(ant['hasta'])}", f"x S/. {monto(rc_a / 12)}", "", monto(ant["monto"])])
+    ven, tru = _por_codigo(doc, "@VACACIONES_VENCIDAS"), _por_codigo(doc, "@VACACIONES_TRUNCAS")
+    vac = snap["vacaciones"]
+    if ven or tru:
+        titulo("VACACIONES :")
+    if tru:
+        f.append(["   Vacaciones Truncas :", "", "", ""])
+        f.append([f"      Periodo {vac['periodo_truncas'].replace('-', ' - ')}", f"{vac['truncas']} dias", monto(tru[0]["monto"]), monto(tru[0]["monto"])])
+    if ven:
+        f.append(["   Vacaciones Pendientes :", "", "", ""])
+        f.append([f"      Periodo {vac['periodo_vencidas'].replace('-', ' - ')}", f"{vac['vencidas']} dias", monto(ven[0]["monto"]), monto(ven[0]["monto"])])
+    gr = _por_codigo(doc, "@GRATIFICACION")
+    if gr:
+        g = snap.get("gratificacion") or {"meses": 0, "dias": 0}
+        titulo("GRATIFICACIONES :")
+        f.append(["   Gratificación Trunca :", f"{g['meses']} meses y {g['dias']} dias", monto(gr[0]["monto"]), monto(gr[0]["monto"])])
+    otros = _por_codigo(doc, "@BONIF_EXTRA_29351", "@DEVOLUCION_5TA", "@INDEMNIZACION_DESPIDO")
+    if otros:
+        titulo("OTROS INGRESOS :")
+        nombres = {"@BONIF_EXTRA_29351": "BONIF. EXTRA L.29351", "@DEVOLUCION_5TA": "DEVOLUCION RETENCION 5TA CATEGORIA",
+                   "@INDEMNIZACION_DESPIDO": "INDEMNIZACION POR DESPIDO ARBITRARIO"}
+        for o in otros:
+            f.append([f"   {nombres[o['codigo']]}", "", monto(o["monto"]), ""])
+        f[-1][3] = monto(sum((_d(o["monto"]) for o in otros), Decimal(0)))
+    if f:
+        el.append(tabla(f, est))
+    el += [barra("TOTAL INGRESOS", f"S/. {monto(doc['total_ingresos'])}"), Spacer(1, 3)]
+
+    # ---- DESCUENTOS
+    el.append(barra("DESCUENTOS"))
+    f, est = [], []
+    pen = snap.get("pension") or {}
+    base_pen = monto(pen.get("base", 0))
+    lineas = []
+    if snap.get("sistema_pensionario") == "AFP":
+        for cod, nom, pct in (("@FONDO_PENSIONES", "FONDO PENSIONES", pen.get("aporte_pct")), ("@COMISION_VARIABLE", "COMISION VARIABLE", pen.get("comision_pct")),
+                              ("@SEGURO_INVALIDEZ", "SEGURO INVALIDEZ", pen.get("prima_pct"))):
+            x = _por_codigo(doc, cod)
+            if x:
+                lineas.append((nom, pct, x[0]["monto"]))
+        if lineas:
+            titulo("POR DESCUENTO DE AFP :")
+            for nom, pct, m in lineas:
+                f.append([f"   {nom}", f"{_d(pct):.2f} %   {base_pen}", monto(m), ""])
+            f[-1][3] = monto(sum((_d(m) for _, _, m in lineas), Decimal(0)))
+    else:
+        x = _por_codigo(doc, "@SNP_ONP")
+        if x:
+            titulo("POR DESCUENTO DE ONP :")
+            f.append(["   SISTEMA NACIONAL DE PENSIONES", f"{_d(pen.get('onp_pct')):.2f} %   {base_pen}", monto(x[0]["monto"]), monto(x[0]["monto"])])
+    r5 = _por_codigo(doc, "@IMP_RENTA_5TA")
+    if r5:
+        titulo("IMPUESTO A LA RENTA :")
+        f.append(["   RETENCION 5TA CATEGORIA", "", monto(r5[0]["monto"]), monto(r5[0]["monto"])])
+    if f:
+        el.append(tabla(f, est))
+    el += [barra("TOTAL DESCUENTOS", f"S/. {monto(doc['total_descuentos'])}"), Spacer(1, 3),
+           barra("NETO A PAGAR", f"S/. {monto(doc['neto_a_pagar'])}", grande=True), Spacer(1, 2)]
+
+    # ---- APORTES
+    es = snap.get("essalud") or {}
+    el.append(barra("APORTES"))
+    f, est = [], []
+    titulo("APORTACIONES DEL EMPLEADOR :")
+    if es.get("con_eps"):
+        f.append(["   APORTE DE EPS", f"{_d(es.get('tasa_eps_pct')):.2f} %   {monto(es.get('base', 0))}", monto(doc["aporte_eps"]), ""])
+    f.append(["   ESSALUD", f"{_d(es.get('tasa_essalud_pct')):.2f} %   {monto(es.get('base', 0))}", monto(doc["aporte_essalud"]),
+              monto(_d(doc["aporte_essalud"]) + _d(doc["aporte_eps"]))])
+    el += [tabla(f, est), barra("TOTAL APORTES", f"S/. {monto(_d(doc['aporte_essalud']) + _d(doc['aporte_eps']))}"), Spacer(1, 3)]
+
+    el.append(Paragraph(f"Recibí de {empresa.razon_social} la cantidad de S/. {monto(doc['neto_a_pagar'])} ({monto_en_letras(doc['neto_a_pagar'])}) por liquidación de los "
+                        "derechos que me corresponden de acuerdo a las disposiciones legales vigentes, estando conforme con ellos.", n8))
     if con_firmas:
-        firmas = Table([["", ""], ["Empleador", "Colaborador (recibí conforme)"]], colWidths=[85 * mm, 85 * mm], rowHeights=[22 * mm, 6 * mm])
-        firmas.setStyle(TableStyle([("LINEABOVE", (0, 1), (-1, 1), 0.5, colors.black), ("ALIGN", (0, 1), (-1, 1), "CENTER"),
-                                    ("FONTSIZE", (0, 1), (-1, 1), 8)]))
-        el += [Spacer(1, 18), firmas]
-    doc.build(el)
+        rep = " · ".join(x for x in (empresa.representante_legal, empresa.cargo_representante) if x)
+        firmas = Table([["", ""], [Paragraph(f"p. {empresa.razon_social}" + (f"<br/>{rep}" if rep else ""), n8),
+                                   Paragraph(f"Firma: {snap['colaborador'].replace(', ', ' ', 1)}<br/>DNI {snap['documento']}", n8)]],
+                       colWidths=[W * 0.5, W * 0.5], rowHeights=[11 * mm, None])
+        firmas.setStyle(TableStyle([("LINEABOVE", (0, 1), (0, 1), 0.5, colors.black), ("LINEABOVE", (1, 1), (1, 1), 0.5, colors.black),
+                                    ("ALIGN", (0, 1), (-1, 1), "CENTER"), ("LEFTPADDING", (0, 1), (0, 1), 10), ("RIGHTPADDING", (0, 1), (0, 1), 40)]))
+        el += [Spacer(1, 3), firmas]
+    if doc.get("avisos"):
+        el += [Spacer(1, 4)] + [Paragraph("• " + a, pq) for a in doc["avisos"]]
+    if con_formulas:
+        el += [PageBreak(), Paragraph("<b>DETALLE DEL CÁLCULO</b> (para revisión interna)", n8b), Spacer(1, 4)]
+        data = [["Concepto", "Monto (S/)", "Cálculo"]] + [[Paragraph(c["descripcion"] or c["codigo"], n8), monto(c["monto"]), Paragraph(c["formula"] or "", pq)] for c in doc["conceptos"]]
+        t = Table(data, colWidths=[W * 0.28, W * 0.14, W * 0.58], repeatRows=1)
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), GRIS_CLARO), ("FONTSIZE", (0, 0), (-1, 0), 8), ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                               ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDDDDD"))]))
+        el.append(t)
+    marca = _marca_agua(doc)
+    pdf.build(el, onFirstPage=marca, onLaterPages=marca)
     return buf.getvalue()
+
+
+def generar_excel(empresa, doc: dict) -> bytes:
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill
+    snap = doc["snapshot"]
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Liquidación"
+    negrita, gris = Font(bold=True), PatternFill("solid", fgColor="BDBDBD")
+    ws.append([empresa.razon_social]); ws["A1"].font = Font(bold=True, size=13)
+    ws.append([f"R.U.C. {empresa.ruc}" + (f" · {empresa.direccion_fiscal}" if empresa.direccion_fiscal else "")])
+    ws.append(["LIQUIDACION DE BENEFICIOS SOCIALES" + ("  (BORRADOR: sin cerrar)" if doc["estado"] != "CERRADA" else "")]); ws["A3"].font = Font(bold=True, size=12)
+    ws.append([fecha_larga(snap["fecha_cese"])])
+    ws.append([])
+    datos = [("Apellidos y nombres", snap["colaborador"]), ("Código (documento)", snap["documento"]), ("Fecha de ingreso", dmy(snap["fecha_ingreso"])),
+             ("Fecha de egreso", dmy(snap["fecha_cese"])), ("Motivo de retiro", motivo_texto(doc.get("motivo_cese"), doc.get("clase_despido"))),
+             ("Tiempo de servicios", _tiempo_formato(snap)), ("Unidad (sede)", snap.get("sede") or ""), ("Planilla (categoría)", snap.get("categoria") or ""),
+             ("Puesto de trabajo", snap.get("puesto") or ""), ("Régimen de pensiones", regimen_pensiones(snap))]
+    for k, v in datos:
+        ws.append([k, v]); ws.cell(ws.max_row, 1).font = negrita
+    ws.append([])
+    ws.append(["REMUNERACIÓN COMPUTABLE", "C.T.S.", "C.T.S. pendiente", "Gratificación", "Vacaciones"])
+    for c in ws[ws.max_row]:
+        c.font = negrita
+    sueldo, af, var = _d(snap["sueldo"]), _d(snap["asignacion_familiar"]), _d(snap["variables_promedio"])
+    rc = sueldo + af + var
+    ws.append(["Sexto de gratificación", float(_d(snap["sexto_gratificacion"])), 0, "", ""])
+    ws.append(["Sueldo básico", float(sueldo), 0, float(sueldo), float(sueldo)])
+    if af:
+        ws.append(["Asignación familiar", float(af), 0, float(af), float(af)])
+    if var:
+        ws.append(["Promedio de variables", float(var), 0, float(var), float(var)])
+    ws.append(["TOTAL REMUNERACIÓN COMPUTABLE", float(_d(snap["rc_cts"])), float(_d((snap.get("cts_anterior") or {}).get("rc", 0))), float(rc), float(rc)])
+    ws.append([])
+    for titulo_, cat in (("INGRESOS", "INGRESO"), ("DESCUENTOS", "DESCUENTO")):
+        ws.append([titulo_, "Cálculo", "Monto (S/)"])
+        for c in ws[ws.max_row]:
+            c.font = negrita; c.fill = gris
+        for c in doc["conceptos"]:
+            if c["categoria"] == cat:
+                ws.append([c["descripcion"] or c["codigo"], c["formula"] or "", float(_d(c["monto"]))])
+        ws.append([f"TOTAL {titulo_}", "", float(_d(doc["total_ingresos"] if cat == "INGRESO" else doc["total_descuentos"]))])
+        ws.cell(ws.max_row, 1).font = negrita
+        ws.append([])
+    ws.append(["NETO A PAGAR", "", float(_d(doc["neto_a_pagar"]))]); ws.cell(ws.max_row, 1).font = Font(bold=True, size=12)
+    ws.append([monto_en_letras(doc["neto_a_pagar"])])
+    ws.append([])
+    es = snap.get("essalud") or {}
+    ws.append(["APORTACIONES DEL EMPLEADOR", "Tasa / base", "Monto (S/)"]); [setattr(c, "font", negrita) for c in ws[ws.max_row]]
+    if es.get("con_eps"):
+        ws.append(["Aporte de EPS", f"{_d(es.get('tasa_eps_pct')):.2f} %  {monto(es.get('base', 0))}", float(_d(doc["aporte_eps"]))])
+    ws.append(["EsSalud", f"{_d(es.get('tasa_essalud_pct')):.2f} %  {monto(es.get('base', 0))}", float(_d(doc["aporte_essalud"]))])
+    ws.column_dimensions["A"].width = 38; ws.column_dimensions["B"].width = 58
+    for col in "CDE":
+        ws.column_dimensions[col].width = 18
+    for fila in ws.iter_rows():
+        for c in fila:
+            if isinstance(c.value, float):
+                c.number_format = "#,##0.00"; c.alignment = Alignment(horizontal="right")
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()

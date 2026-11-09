@@ -13,14 +13,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from . import calculo, exportadores, liquidacion as L, pdf_liquidacion, reglas as R, semestrales
+from . import calculo, exportadores, liquidacion as L, parametros_periodo, pdf_boleta, pdf_liquidacion, reglas as R, semestrales
 from .config import allowed_origins
 from .db import get_db
 from .diccionario import ErrorDeNegocio
 from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionario, DiccionarioAFP, Empleado,
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
 from .models import Liquidacion, LiquidacionDetalle, Vinculo
-from .schemas import (CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, LiquidacionPatchIn, LiquidacionProcesarIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
+from .schemas import (EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
                       RentaPreviaIn, SueldoIn, VacacionIn)
 from .security import Acceso, empresa_actual, exigir_admin, generar_api_key, get_acceso, get_cuenta, hash_key
 
@@ -53,7 +53,7 @@ def _avisos_header(av: dict, sin_codigo=()) -> str:
     """Resumen en ASCII para que el navegador avise (cabecera X-Avisos)."""
     partes = [f"liquidaciones-incluidas={av['incluidas']}"]
     if av["abiertas"]:
-        partes.append(f"liquidaciones-abiertas-no-incluidas={len(av['abiertas'])}")
+        partes.append(f"liquidaciones-sin-cerrar={len(av['abiertas'])}")
     if sin_codigo:
         partes.append("conceptos-sin-codigo-plame=" + ",".join(sin_codigo))
     return "; ".join(partes).encode("ascii", "ignore").decode()
@@ -135,6 +135,8 @@ def listar_empresas(acceso: Acceso = Depends(get_acceso), db: Session = Depends(
     cuentas = {c.id: c for c in db.query(Cuenta)}
     activos = lambda eid: db.query(Empleado).filter(Empleado.empresa_id == eid, Empleado.fecha_cese.is_(None)).count()
     return [{"id": e.id, "ruc": e.ruc, "razon_social": e.razon_social, "trabajadores_activos": activos(e.id),
+             "direccion_fiscal": e.direccion_fiscal, "representante_legal": e.representante_legal,
+             "cargo_representante": e.cargo_representante,
              "limite_trabajadores": cuentas[e.cuenta_id].max_trabajadores, "cuenta_id": e.cuenta_id,
              "cuenta": cuentas[e.cuenta_id].nombre if acceso.admin else None}
             for e in q.order_by(Empresa.razon_social)]
@@ -158,12 +160,23 @@ def crear_empresa(data: EmpresaIn, acceso: Acceso = Depends(get_acceso), db: Ses
            .order_by(Diccionario.version.desc()).first())
     if not dic:
         raise HTTPException(422, f"Diccionario {data.diccionario_codigo} no existe.")
-    e = Empresa(cuenta_id=cuenta.id, ruc=data.ruc, razon_social=data.razon_social.upper(), diccionario_id=dic.id)
+    e = Empresa(cuenta_id=cuenta.id, ruc=data.ruc, razon_social=data.razon_social.upper(), diccionario_id=dic.id,
+                direccion_fiscal=data.direccion_fiscal, representante_legal=data.representante_legal,
+                cargo_representante=data.cargo_representante)
     db.add(e)
     if acceso.admin:
         db.add(Auditoria(cuenta_id=cuenta.id, accion="ADMIN_CREA_EMPRESA", detalle=f"RUC {data.ruc}"))
     db.commit()
     return {"id": e.id, "ruc": e.ruc, "razon_social": e.razon_social, "cuenta_id": cuenta.id}
+
+
+@app.patch(API + "/empresas/{empresa_id}")
+def actualizar_empresa(data: EmpresaPatch, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Datos de la empresa que salen en boletas y liquidaciones (razón social, dirección, representante)."""
+    for campo, valor in data.model_dump(exclude_unset=True).items():
+        setattr(empresa, campo, valor.upper() if campo == "razon_social" and valor else valor)
+    db.commit()
+    return {"ok": True, "razon_social": empresa.razon_social}
 
 
 # ------------------------------------------------------------------ administrador del software
@@ -212,7 +225,8 @@ def listar_empleados(empresa: Empresa = Depends(empresa_actual), db: Session = D
              "asignacion_familiar": e.asignacion_familiar, "cobertura_eps": e.cobertura_eps,
              "fecha_ingreso": e.fecha_ingreso, "fecha_cese": e.fecha_cese, "motivo_cese": e.motivo_cese,
              "clase_despido": e.clase_despido, "tipo_contrato": e.tipo_contrato,
-             "fecha_fin_contrato": e.fecha_fin_contrato,
+             "fecha_fin_contrato": e.fecha_fin_contrato, "area": e.area, "centro_costo": e.centro_costo,
+             "categoria": e.categoria, "calificacion": e.calificacion, "tipo_comision": e.tipo_comision,
              "sueldo_vigente": calculo.sueldo_a_fecha(db, e.id, hoy)}
             for e in db.query(Empleado).filter(Empleado.empresa_id == empresa.id)
             .order_by(Empleado.apellidos, Empleado.nombres)]
@@ -238,7 +252,9 @@ def crear_empleado(data: EmpleadoIn, empresa: Empresa = Depends(empresa_actual),
                  afp_nombre=data.afp_nombre.upper() if data.afp_nombre else None, cuspp=data.cuspp,
                  banco=data.banco, numero_cuenta=data.numero_cuenta, asignacion_familiar=data.asignacion_familiar,
                  cobertura_eps=data.cobertura_eps, regimen_codigo="RG_728", tipo_contrato=data.tipo_contrato,
-                 fecha_fin_contrato=data.fecha_fin_contrato)
+                 fecha_fin_contrato=data.fecha_fin_contrato, area=data.area, centro_costo=data.centro_costo,
+                 categoria=data.categoria or "EMPLEADOS", calificacion=data.calificacion,
+                 tipo_comision=data.tipo_comision if data.sistema_pensionario == "AFP" else "FLUJO")
     db.add(e)
     db.flush()
     db.add(Sueldo(empleado_id=e.id, monto=Decimal(str(data.sueldo_basico)), fecha_vigencia=data.fecha_ingreso,
@@ -267,9 +283,7 @@ def reactivar_por_error(empleado_id: int, empresa: Empresa = Depends(empresa_act
     e = _empleado(db, empresa, empleado_id)
     if e.estado != "CESADO":
         raise HTTPException(409, "El colaborador no está cesado.")
-    L.exigir_sin_liquidacion_cerrada(db, e.id, "reactivarlo")
-    for abierta in db.query(Liquidacion).filter(Liquidacion.empleado_id == e.id, Liquidacion.estado == "ABIERTA").all():
-        L.descartar_abierta(db, abierta)                 # liquidación en borrador de un cese que se anula
+    L.exigir_sin_liquidacion_cerrada(db, e.id, "reactivarlo")      # solo una liquidación CERRADA bloquea; no hay borradores guardados
     e.fecha_cese, e.motivo_cese, e.clase_despido, e.estado = None, None, None, "ACTIVO"
     db.commit()
     return {"estado": e.estado}
@@ -353,7 +367,25 @@ def crear_periodo(data: PeriodoIn, empresa: Empresa = Depends(empresa_actual), d
                 diccionario_id=empresa.diccionario_id)
     db.add(p)
     db.commit()
-    return {"id": p.id, "estado": p.estado}
+    arrastrados = parametros_periodo.copiar_del_anterior(db, p)       # «viaja la información de un mes al otro»
+    return {"id": p.id, "estado": p.estado, "parametros_arrastrados": arrastrados}
+
+
+@app.get(API + "/empresas/{empresa_id}/periodos/{periodo_id}/parametros")
+def ver_parametros(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """UIT, RMV, tasas y tasas por AFP vigentes en el periodo (editadas o arrastradas del mes anterior; si no, las del Diccionario)."""
+    return parametros_periodo.efectivos(db, empresa, _periodo(db, empresa, periodo_id))
+
+
+@app.put(API + "/empresas/{empresa_id}/periodos/{periodo_id}/parametros")
+def guardar_parametros(periodo_id: int, data: ParametrosPeriodoIn, empresa: Empresa = Depends(empresa_actual),
+                       cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    """Edita los parámetros del periodo ABIERTO. Los periodos siguientes los heredan al abrirse. Luego hay que Recalcular."""
+    p = _periodo(db, empresa, periodo_id)
+    r = parametros_periodo.guardar(db, empresa, p, data.parametros, data.afps)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="EDITA_PARAMETROS_PERIODO", detalle=f"{p.mes:02d}/{p.anio}"))
+    db.commit()
+    return r
 
 
 @app.put(API + "/empresas/{empresa_id}/periodos/{periodo_id}/novedades")
@@ -402,8 +434,7 @@ def recalcular(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: 
     except Exception:
         db.rollback()
         raise
-    problemas = L.refrescar_abiertas(db, p)          # las liquidaciones ABIERTAS se recalculan sobre la boleta nueva
-    return {"status": "success", "periodo": f"{p.mes:02d}/{p.anio}", **r, "avisos_liquidaciones": problemas}
+    return {"status": "success", "periodo": f"{p.mes:02d}/{p.anio}", **r}
 
 
 @app.post(API + "/empresas/{empresa_id}/planillas/{periodo_id}/cerrar")
@@ -423,7 +454,7 @@ def reabrir(periodo_id: int, data: ReaperturaIn, empresa: Empresa = Depends(empr
 @app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/resultados")
 def resultados(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     p = _periodo(db, empresa, periodo_id)
-    liqs = {l.empleado_id: l for l in db.query(Liquidacion).filter(Liquidacion.periodo_id == p.id)}
+    liqs = {l.empleado_id: l for l in db.query(Liquidacion).filter(Liquidacion.periodo_id == p.id, Liquidacion.estado == "CERRADA")}
 
     def fila(r):
         l = liqs.get(r.empleado_id)
@@ -530,11 +561,21 @@ def resumen_conceptos(periodo_id: int, empresa: Empresa = Depends(empresa_actual
     p = _periodo(db, empresa, periodo_id)
     desc = {c.codigo: c.descripcion for c in db.query(Concepto).filter(Concepto.diccionario_id == p.diccionario_id)}
     filas = (db.query(Detalle.concepto_codigo, Detalle.categoria, func.sum(Detalle.monto), func.count(Detalle.empleado_id))
-             .filter(Detalle.periodo_id == p.id).group_by(Detalle.concepto_codigo, Detalle.categoria)
-             .order_by(Detalle.categoria, Detalle.concepto_codigo).all())
-    neto = db.query(func.coalesce(func.sum(Resultado.neto_a_pagar), 0)).filter(Resultado.periodo_id == p.id).scalar()
-    return {"neto_total": neto, "conceptos": [{"codigo": c, "descripcion": desc.get(c, ""), "categoria": cat,
-                                               "total": t, "colaboradores": n} for c, cat, t, n in filas]}
+             .filter(Detalle.periodo_id == p.id).group_by(Detalle.concepto_codigo, Detalle.categoria).all())
+    acum = {(c, cat): [Decimal(str(t)), n] for c, cat, t, n in filas}
+    neto = Decimal(str(db.query(func.coalesce(func.sum(Resultado.neto_a_pagar), 0)).filter(Resultado.periodo_id == p.id).scalar()))
+    # lo CERRADO de las liquidaciones se suma; los cálculos sin cerrar no entran
+    cerradas = db.query(Liquidacion).filter(Liquidacion.periodo_id == p.id, Liquidacion.estado == "CERRADA").all()
+    for liq in cerradas:
+        neto += Decimal(str(liq.neto_a_pagar))
+        for d in db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id):
+            fila = acum.setdefault((d.concepto_codigo, d.categoria), [Decimal(0), 0])
+            fila[0] += Decimal(str(d.monto))
+            fila[1] += 1
+    orden = {"PARAMETRO": 0, "INGRESO": 1, "DESCUENTO": 2, "APORTE": 3}
+    return {"neto_total": neto, "liquidaciones_incluidas": len(cerradas),
+            "conceptos": [{"codigo": c, "descripcion": desc.get(c, ""), "categoria": cat, "total": t, "colaboradores": n}
+                          for (c, cat), (t, n) in sorted(acum.items(), key=lambda kv: (orden.get(kv[0][1], 9), kv[0][0]))]}
 
 
 
@@ -545,7 +586,8 @@ def parametros_vigentes(empresa: Empresa = Depends(empresa_actual), db: Session 
     dic = db.get(Diccionario, empresa.diccionario_id)
     pr = cargar_parametros(db, empresa.diccionario_id, date.today())
     return {"diccionario": f"{dic.codigo} v{dic.version}", "parametros": {k: str(v) for k, v in pr.p.items()},
-            "afps": [{"nombre": a.nombre, "aporte": a.aporte, "comision": a.comision, "prima": a.prima, "tope_prima": a.tope_prima}
+            "afps": [{"nombre": a.nombre, "aporte": a.aporte, "comision": a.comision, "comision_mixta_flujo": a.comision_mixta_flujo,
+                      "comision_saldo": a.comision_saldo, "prima": a.prima, "tope_prima": a.tope_prima}
                      for a in sorted(pr.afps.values(), key=lambda x: x.nombre)]}
 
 
@@ -572,117 +614,143 @@ def exportar_plame(periodo_id: int, empresa: Empresa = Depends(empresa_actual), 
 
 
 # ------------------------------------------------------------------ módulo Liquidaciones
-def _liq(db: Session, empresa: Empresa, liq_id: int):
-    liq = (db.query(Liquidacion).join(Periodo, Periodo.id == Liquidacion.periodo_id)
-           .filter(Liquidacion.id == liq_id, Periodo.empresa_id == empresa.id).first())
-    if not liq:
-        raise HTTPException(404, "Liquidación no encontrada.")
-    return liq, db.get(Periodo, liq.periodo_id), db.get(Empleado, liq.empleado_id)
+# La liquidación NO se guarda como borrador: «Ver», PDF y Excel la calculan al pedirlos. Solo «Cerrar» la guarda, y solo lo
+# cerrado viaja al AFPnet, al PLAME y a los resúmenes. «Reabrir» anula el cierre (con motivo) y vuelve a ser un cálculo.
+def _descripciones(db: Session, periodo: Periodo) -> dict:
+    return {c.codigo: c.descripcion for c in db.query(Concepto).filter(Concepto.diccionario_id == periodo.diccionario_id)}
 
 
-def _vista_liq(db: Session, liq: Liquidacion, periodo: Periodo, emp: Empleado) -> dict:
-    desc = {c.codigo: c.descripcion for c in db.query(Concepto).filter(Concepto.diccionario_id == periodo.diccionario_id)}
-    _, a_fin = R.semestre_cts_anterior(emp.fecha_cese)
-    aplica_cts = emp.fecha_ingreso <= a_fin
-    faltantes = L.faltantes_para_cerrar(liq, emp, aplica_cts)
-    return {
-        "id": liq.id, "estado": liq.estado, "periodo": {"id": periodo.id, "anio": periodo.anio, "mes": periodo.mes,
-                                                          "estado": periodo.estado},
-        "empleado_id": emp.id, "documento": emp.documento_identidad, "colaborador": f"{emp.apellidos}, {emp.nombres}",
-        "fecha_ingreso": emp.fecha_ingreso, "fecha_cese": liq.fecha_cese, "motivo_cese": liq.motivo_cese,
-        "clase_despido": liq.clase_despido, "tipo_contrato": liq.tipo_contrato, "fecha_fin_contrato": liq.fecha_fin_contrato,
-        "cts_anterior_aplica": aplica_cts, "cts_anterior_pagada": liq.cts_anterior_pagada,
-        "total_ingresos": liq.total_ingresos, "total_descuentos": liq.total_descuentos, "neto_a_pagar": liq.neto_a_pagar,
-        "ret_5ta_ajuste": liq.ret_5ta_ajuste, "aporte_essalud": liq.aporte_essalud, "aporte_eps": liq.aporte_eps,
-        "avisos": liq.avisos or [], "faltantes_para_cerrar": faltantes,
-        "puede_cerrar": liq.estado == "ABIERTA" and not faltantes and periodo.estado == "ABIERTO",
-        "plazo_pago": liq.fecha_cese + timedelta(days=2), "snapshot": liq.snapshot,
-        "conceptos": [{"codigo": d.concepto_codigo, "descripcion": desc.get(d.concepto_codigo, ""), "categoria": d.categoria,
-                       "monto": d.monto, "formula": d.formula}
-                      for d in db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id)
-                      .order_by(LiquidacionDetalle.orden)]}
+def _doc_comun(periodo: Periodo, emp: Empleado) -> dict:
+    return {"periodo": {"id": periodo.id, "anio": periodo.anio, "mes": periodo.mes, "estado": periodo.estado},
+            "empleado_id": emp.id, "documento": emp.documento_identidad, "colaborador": f"{emp.apellidos}, {emp.nombres}",
+            "fecha_ingreso": emp.fecha_ingreso, "fecha_cese": emp.fecha_cese, "plazo_pago": emp.fecha_cese + timedelta(days=2)}
+
+
+def _doc_calculo(db: Session, periodo: Periodo, emp: Empleado, calc) -> dict:
+    desc = _descripciones(db, periodo)
+    return {**_doc_comun(periodo, emp), "estado": "SIN_CERRAR", "liquidacion_id": None, "motivo_cese": emp.motivo_cese,
+            "clase_despido": emp.clase_despido, "tipo_tipo": None, "tipo_contrato": emp.tipo_contrato,
+            "fecha_fin_contrato": emp.fecha_fin_contrato, "cts_anterior_aplica": calc.cts_anterior_aplica,
+            "cts_anterior_pagada": calc.cts_anterior_pagada, "total_ingresos": calc.total_ingresos,
+            "total_descuentos": calc.total_descuentos, "neto_a_pagar": calc.neto, "ret_5ta_ajuste": calc.ret_5ta_ajuste,
+            "aporte_essalud": calc.aporte_essalud, "aporte_eps": calc.aporte_eps, "avisos": calc.avisos,
+            "faltantes_para_cerrar": calc.faltantes, "puede_cerrar": not calc.faltantes and periodo.estado == "ABIERTO",
+            "snapshot": calc.snapshot,
+            "conceptos": [{"codigo": f["codigo"], "descripcion": desc.get(f["codigo"], ""), "categoria": f["categoria"],
+                           "monto": f["monto"], "formula": f["formula"]} for f in calc.filas]}
+
+
+def _doc_cerrada(db: Session, liq: Liquidacion, emp: Empleado) -> dict:
+    periodo = db.get(Periodo, liq.periodo_id)
+    desc = _descripciones(db, periodo)
+    _, a_fin = R.semestre_cts_anterior(liq.fecha_cese)
+    return {**_doc_comun(periodo, emp), "estado": "CERRADA", "liquidacion_id": liq.id, "motivo_cese": liq.motivo_cese,
+            "clase_despido": liq.clase_despido, "tipo_contrato": liq.tipo_contrato, "fecha_fin_contrato": liq.fecha_fin_contrato,
+            "cts_anterior_aplica": emp.fecha_ingreso <= a_fin, "cts_anterior_pagada": liq.cts_anterior_pagada,
+            "total_ingresos": liq.total_ingresos, "total_descuentos": liq.total_descuentos, "neto_a_pagar": liq.neto_a_pagar,
+            "ret_5ta_ajuste": liq.ret_5ta_ajuste, "aporte_essalud": liq.aporte_essalud, "aporte_eps": liq.aporte_eps,
+            "avisos": liq.avisos or [], "faltantes_para_cerrar": [], "puede_cerrar": False, "snapshot": liq.snapshot,
+            "conceptos": [{"codigo": d.concepto_codigo, "descripcion": desc.get(d.concepto_codigo, ""), "categoria": d.categoria,
+                           "monto": d.monto, "formula": d.formula}
+                          for d in db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id)
+                          .order_by(LiquidacionDetalle.orden)]}
+
+
+def _documento(db: Session, empresa: Empresa, periodo_id: int, empleado_id: int, cts_pagada: Optional[bool]) -> dict:
+    """La liquidación CERRADA (guardada) si existe; si no, el cálculo de hoy sin guardar."""
+    emp = _empleado(db, empresa, empleado_id)
+    if emp.fecha_cese is None:
+        raise HTTPException(422, "El colaborador no tiene fecha de cese.")
+    liq = (db.query(Liquidacion).filter(Liquidacion.empleado_id == emp.id, Liquidacion.estado == "CERRADA",
+                                        Liquidacion.fecha_cese == emp.fecha_cese).first())
+    if liq:
+        return _doc_cerrada(db, liq, emp)
+    periodo = _periodo(db, empresa, periodo_id)
+    return _doc_calculo(db, periodo, emp, L.calcular(db, periodo, emp, cts_pagada))
 
 
 @app.get(API + "/empresas/{empresa_id}/liquidaciones")
-def listar_liquidaciones(periodo_id: int, estado: Optional[str] = Query(None, pattern="^(TODAS|SIN_INICIAR|ABIERTA|CERRADA)$"),
+def listar_liquidaciones(periodo_id: int, estado: Optional[str] = Query(None, pattern="^(TODAS|SIN_CERRAR|CERRADA)$"),
                          empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
-    """Cesados del periodo elegido (y pendientes de meses anteriores) con el estado de su liquidación."""
+    """Cesados del periodo (y pendientes de meses anteriores) con su estado: SIN_CERRAR o CERRADA."""
     p = _periodo(db, empresa, periodo_id)
     filas = L.listar(db, p, estado)
     cuenta = lambda e: sum(1 for f in filas if f["estado"] == e)
     return {"periodo": {"id": p.id, "anio": p.anio, "mes": p.mes, "estado": p.estado}, "filas": filas,
-            "resumen": {"sin_iniciar": cuenta("SIN_INICIAR"), "abiertas": cuenta("ABIERTA"), "cerradas": cuenta("CERRADA")}}
+            "resumen": {"sin_cerrar": cuenta("SIN_CERRAR"), "cerradas": cuenta("CERRADA")}}
 
 
-@app.post(API + "/empresas/{empresa_id}/liquidaciones")
-def procesar_liquidaciones(data: LiquidacionProcesarIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
-    """Procesa una o varias liquidaciones desde el listado de ceses del mes. Cada colaborador se procesa por separado."""
-    p = _periodo(db, empresa, data.periodo_id)
-    procesadas, errores = [], []
-    for eid in data.empleado_ids:
-        emp = db.query(Empleado).filter(Empleado.id == eid, Empleado.empresa_id == empresa.id).first()
-        if emp is None:
-            errores.append({"empleado_id": eid, "colaborador": None, "error": "Colaborador no encontrado."})
-            continue
-        try:
-            liq = L.procesar(db, p, emp, data.cts_anterior_pagada)
-            procesadas.append({"empleado_id": eid, "liquidacion_id": liq.id, "estado": liq.estado,
-                               "neto_a_pagar": liq.neto_a_pagar, "avisos": liq.avisos or []})
-        except ErrorDeNegocio as ex:
-            db.rollback()
-            errores.append({"empleado_id": eid, "colaborador": f"{emp.apellidos}, {emp.nombres}", "error": ex.mensaje})
-    return {"procesadas": procesadas, "errores": errores}
+@app.get(API + "/empresas/{empresa_id}/liquidaciones/vista")
+def ver_liquidacion(periodo_id: int, empleado_id: int, cts_anterior_pagada: Optional[bool] = None,
+                    empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """«Ver»: calcula al momento (sin guardar nada) o muestra la liquidación cerrada."""
+    return _documento(db, empresa, periodo_id, empleado_id, cts_anterior_pagada)
 
 
-@app.get(API + "/empresas/{empresa_id}/liquidaciones/{liquidacion_id}")
-def ver_liquidacion(liquidacion_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
-    liq, p, emp = _liq(db, empresa, liquidacion_id)
-    return _vista_liq(db, liq, p, emp)
+@app.get(API + "/empresas/{empresa_id}/liquidaciones/pdf")
+def pdf_de_liquidacion(periodo_id: int, empleado_id: int, cts_anterior_pagada: Optional[bool] = None, formulas: bool = False,
+                       firmas: bool = True, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """PDF con el formato de la empresa. Sin cerrar, sale como BORRADOR y no se guarda nada."""
+    doc = _documento(db, empresa, periodo_id, empleado_id, cts_anterior_pagada)
+    contenido = pdf_liquidacion.generar_pdf(empresa, doc, formulas, firmas)
+    nombre = f"LIQUIDACION_{empresa.ruc}_{doc['documento']}_{doc['periodo']['anio']}-{doc['periodo']['mes']:02d}" + ("" if doc["estado"] == "CERRADA" else "_BORRADOR")
+    return Response(contenido, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={nombre}.pdf"})
 
 
-@app.patch(API + "/empresas/{empresa_id}/liquidaciones/{liquidacion_id}")
-def marcar_cts_pagada(liquidacion_id: int, data: LiquidacionPatchIn, empresa: Empresa = Depends(empresa_actual),
-                      db: Session = Depends(get_db)):
-    """Marca si la CTS del semestre anterior ya fue pagada; recalcula la liquidación."""
-    liq, p, emp = _liq(db, empresa, liquidacion_id)
-    L.actualizar_marca_cts(db, liq, emp, p, data.cts_anterior_pagada)
-    return _vista_liq(db, liq, p, emp)
+@app.get(API + "/empresas/{empresa_id}/liquidaciones/excel")
+def excel_de_liquidacion(periodo_id: int, empleado_id: int, cts_anterior_pagada: Optional[bool] = None,
+                         empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    doc = _documento(db, empresa, periodo_id, empleado_id, cts_anterior_pagada)
+    contenido = pdf_liquidacion.generar_excel(empresa, doc)
+    nombre = f"LIQUIDACION_{empresa.ruc}_{doc['documento']}_{doc['periodo']['anio']}-{doc['periodo']['mes']:02d}" + ("" if doc["estado"] == "CERRADA" else "_BORRADOR")
+    return Response(contenido, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename={nombre}.xlsx"})
 
 
-@app.post(API + "/empresas/{empresa_id}/liquidaciones/{liquidacion_id}/cerrar")
-def cerrar_liquidacion(liquidacion_id: int, empresa: Empresa = Depends(empresa_actual),
+@app.post(API + "/empresas/{empresa_id}/liquidaciones/cerrar")
+def cerrar_liquidacion(data: LiquidacionCerrarIn, empresa: Empresa = Depends(empresa_actual),
                        cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
-    liq, p, emp = _liq(db, empresa, liquidacion_id)
-    L.cerrar(db, liq, p, emp, cuenta.id)
-    return _vista_liq(db, liq, p, emp)
+    """Cierre DEFINITIVO: lo único que se guarda. Desde aquí viaja al AFPnet, al PLAME y a los resúmenes."""
+    periodo = _periodo(db, empresa, data.periodo_id)
+    emp = _empleado(db, empresa, data.empleado_id)
+    liq = L.cerrar(db, periodo, emp, cuenta.id, data.cts_anterior_pagada)
+    return _doc_cerrada(db, liq, emp)
 
 
 @app.post(API + "/empresas/{empresa_id}/liquidaciones/{liquidacion_id}/reabrir")
 def reabrir_liquidacion(liquidacion_id: int, data: ReaperturaIn, empresa: Empresa = Depends(empresa_actual),
                         cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
-    liq, p, emp = _liq(db, empresa, liquidacion_id)
-    L.reabrir(db, liq, p, cuenta.id, data.motivo)
-    return _vista_liq(db, liq, p, emp)
+    """Anula el cierre: deja de viajar a PLAME, AFPnet y resúmenes y vuelve a ser un cálculo sin guardar."""
+    liq = (db.query(Liquidacion).join(Periodo, Periodo.id == Liquidacion.periodo_id)
+           .filter(Liquidacion.id == liquidacion_id, Periodo.empresa_id == empresa.id).first())
+    if not liq:
+        raise HTTPException(404, "Liquidación no encontrada.")
+    L.reabrir(db, liq, db.get(Periodo, liq.periodo_id), cuenta.id, data.motivo)
+    return {"ok": True, "estado": "SIN_CERRAR"}
 
 
-@app.delete(API + "/empresas/{empresa_id}/liquidaciones/{liquidacion_id}")
-def descartar_liquidacion(liquidacion_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
-    liq, _, _ = _liq(db, empresa, liquidacion_id)
-    L.descartar_abierta(db, liq)
-    return {"ok": True}
-
-
-@app.get(API + "/empresas/{empresa_id}/liquidaciones/{liquidacion_id}/pdf")
-def pdf_de_liquidacion(liquidacion_id: int, formulas: bool = True, firmas: bool = False,
-                       empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
-    """Un PDF por liquidación. Las ABIERTAS salen marcadas como BORRADOR."""
-    liq, p, emp = _liq(db, empresa, liquidacion_id)
-    desc = {c.codigo: c.descripcion for c in db.query(Concepto).filter(Concepto.diccionario_id == p.diccionario_id)}
-    detalle = db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id).order_by(LiquidacionDetalle.orden).all()
-    contenido = pdf_liquidacion.generar(empresa, liq, detalle, desc, formulas, firmas)
-    nombre = f"LIQUIDACION_{empresa.ruc}_{emp.documento_identidad}_{p.anio}-{p.mes:02d}" + ("" if liq.estado == "CERRADA" else "_BORRADOR")
+# ------------------------------------------------------------------ boletas mensuales en PDF (formato de la empresa)
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/boletas/pdf")
+def boletas_pdf(periodo_id: int, empleado_id: Optional[int] = None, empresa: Empresa = Depends(empresa_actual),
+                db: Session = Depends(get_db)):
+    """Una boleta (o todas las del periodo), dos copias por hoja. Requiere haber calculado el periodo."""
+    p = _periodo(db, empresa, periodo_id)
+    q = (db.query(Resultado, Empleado).join(Empleado, Empleado.id == Resultado.empleado_id)
+         .filter(Resultado.periodo_id == p.id).order_by(Empleado.apellidos, Empleado.nombres))
+    if empleado_id:
+        q = q.filter(Empleado.id == empleado_id)
+    filas = q.all()
+    if not filas:
+        raise HTTPException(409, "El periodo no tiene resultados: ejecute Recalcular primero.")
+    desc = _descripciones(db, p)
+    items = []
+    for res, emp in filas:
+        det = [{"codigo": d.concepto_codigo, "categoria": d.categoria, "monto": d.monto, "formula": d.formula}
+               for d in db.query(Detalle).filter(Detalle.periodo_id == p.id, Detalle.empleado_id == emp.id).order_by(Detalle.id)]
+        items.append({"empleado": emp, "resultado": res, "detalle": det, "descripciones": desc, "snapshot": res.snapshot})
+    contenido = pdf_boleta.generar(empresa, p, items)
+    nombre = f"BOLETAS_{empresa.ruc}_{p.anio}_{p.mes:02d}" + (f"_{filas[0][1].documento_identidad}" if empleado_id else "")
     return Response(contenido, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={nombre}.pdf"})
-
 
 
 # ------------------------------------------------------------------ CTS semestral
@@ -728,8 +796,6 @@ def reingreso(empleado_id: int, data: ReingresoIn, empresa: Empresa = Depends(em
         raise HTTPException(409, "Solo se puede reingresar a un colaborador cesado.")
     if data.fecha_ingreso <= e.fecha_cese:
         raise HTTPException(422, f"La nueva fecha de ingreso debe ser posterior al cese ({e.fecha_cese}).")
-    if db.query(Liquidacion).filter(Liquidacion.empleado_id == e.id, Liquidacion.estado == "ABIERTA").first():
-        raise HTTPException(409, "Cierre o descarte la liquidación abierta antes de registrar el reingreso.")
     activos = db.query(Empleado).filter(Empleado.empresa_id == empresa.id, Empleado.fecha_cese.is_(None)).count()
     if activos >= cuenta.max_trabajadores:
         raise HTTPException(403, f"Tu plan {cuenta.plan} permite hasta {cuenta.max_trabajadores} trabajadores por empresa.")
