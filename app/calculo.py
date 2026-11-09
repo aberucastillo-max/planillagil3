@@ -224,6 +224,11 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
             retenido_otros=ret_otros, uit=pr["UIT"], deduccion_uit=pr["DEDUCCION_5TA_UIT"],
             deduccion_adicional_uit=pr["DEDUCCION_ADICIONAL_5TA_UIT"], escala=pr.escala)
         directa = R.q2(base_dir * pr["TASA_5TA_DIRECTA"])
+        if emp.fecha_cese is not None and fi <= emp.fecha_cese <= ff:
+            # REGLA DEL DUEÑO: en la boleta del mes del cese NO se retiene la 5ta regular; todo se aplica en la liquidación
+            # (la base del mes sí cuenta en el acumulado, así que el ajuste final de la liquidación es el correcto).
+            reg = CERO
+            alertas.append(f"{nombre}: cesado, la retención de 5ta categoría del mes se aplica en su liquidación (ciérrela para que se descuente).")
         add("@IMP_RENTA_5TA", reg + directa, f"regular {reg} + directa {directa}")
 
         # ---- descuento EPS del trabajador (Beneficios vigentes en el periodo)

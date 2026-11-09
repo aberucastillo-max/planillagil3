@@ -73,6 +73,11 @@ Al arrancar, la API agrega sola las columnas y los parámetros nuevos (idempoten
 - **Rentas previas de 5ta categoría** (empleadores anteriores): `GET/POST/PUT/DELETE .../empleados/{id}/rentas-previas-5ta`. El Legajo muestra el
   historial con totales y permite editar y eliminar; no se duplican registros idénticos y, si un periodo CERRADO ya las incorporó, no se cambian.
 
+- **5ta del cesado:** en la boleta del mes del cese NO se retiene la 5ta regular (la base sí cuenta); la liquidación aplica el ajuste completo.
+- **Opciones de la liquidación en tiempo real** (parámetros de `vista`, `pdf` y `excel`; no se guardan): `cts_anterior_pagada`,
+  `vac_modo` (FORMULA, CERO, DIAS o MONTO) con `vac_valor`, y `excluir` (claves de conceptos deshabilitados para SIMULAR; una simulación no
+  se puede cerrar). Al cerrar solo se guardan la CTS y la decisión de vacaciones pendientes.
+
 ## Administrador del software (pruebas)
 Con el código de instalación (`ADMIN_TOKEN`; si no existe, `SETUP_TOKEN`) se entra como **administrador**: en el engranaje del HTML
 elija «Administrador». Ve todas las cuentas y todos los RUC, crea cuentas (devuelve su clave una sola vez) y empresas en la cuenta que

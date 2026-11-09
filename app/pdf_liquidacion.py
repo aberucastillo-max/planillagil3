@@ -34,11 +34,11 @@ def _marca_agua(doc):
     def f(canvas, _):
         if doc["estado"] != "CERRADA":
             canvas.saveState()
-            canvas.setFont("Helvetica-Bold", 70)
+            canvas.setFont("Helvetica-Bold", 62 if doc.get("simulacion") else 70)
             canvas.setFillColorRGB(0.88, 0.88, 0.88)
             canvas.translate(105 * mm, 120 * mm)
             canvas.rotate(45)
-            canvas.drawCentredString(0, 0, "BORRADOR")
+            canvas.drawCentredString(0, 0, "SIMULACIÓN" if doc.get("simulacion") else "BORRADOR")
             canvas.restoreState()
     return f
 
@@ -54,6 +54,8 @@ def generar_pdf(empresa, doc: dict, con_formulas: bool = False, con_firmas: bool
                             title="Liquidación de beneficios sociales")
     W = 182 * mm
     el = []
+    if doc.get("simulacion"):
+        el.append(Paragraph("<font color='#B91C1C'><b>SIMULACIÓN para pruebas: hay conceptos deshabilitados; estos montos NO son la liquidación real.</b></font>", n8))
     if doc["estado"] != "CERRADA":
         el.append(Paragraph("<font color='#B45309'><b>BORRADOR · liquidación sin cerrar: no se guarda ni viaja al PLAME, AFP o resúmenes hasta cerrarla.</b></font>", n8))
     el += [Paragraph(f"<b>{empresa.razon_social}</b>", ParagraphStyle("e", parent=n8, fontSize=11, leading=13)),
@@ -231,7 +233,7 @@ def generar_excel(empresa, doc: dict) -> bytes:
     negrita, gris = Font(bold=True), PatternFill("solid", fgColor="BDBDBD")
     ws.append([empresa.razon_social]); ws["A1"].font = Font(bold=True, size=13)
     ws.append([f"R.U.C. {empresa.ruc}" + (f" · {empresa.direccion_fiscal}" if empresa.direccion_fiscal else "")])
-    ws.append(["LIQUIDACION DE BENEFICIOS SOCIALES" + ("  (BORRADOR: sin cerrar)" if doc["estado"] != "CERRADA" else "")]); ws["A3"].font = Font(bold=True, size=12)
+    ws.append(["LIQUIDACION DE BENEFICIOS SOCIALES" + ("  (SIMULACIÓN para pruebas: conceptos deshabilitados)" if doc.get("simulacion") else ("  (BORRADOR: sin cerrar)" if doc["estado"] != "CERRADA" else ""))]); ws["A3"].font = Font(bold=True, size=12)
     ws.append([fecha_larga(snap["fecha_cese"])])
     ws.append([])
     datos = [("Apellidos y nombres", snap["colaborador"]), ("Código (documento)", snap["documento"]), ("Fecha de ingreso", dmy(snap["fecha_ingreso"])),

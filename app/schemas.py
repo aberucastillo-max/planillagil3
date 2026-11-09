@@ -182,6 +182,8 @@ class LiquidacionCerrarIn(BaseModel):
     periodo_id: int
     empleado_id: int
     cts_anterior_pagada: Optional[bool] = None
+    vac_modo: str = Field(default="FORMULA", pattern="^(FORMULA|CERO|DIAS|MONTO)$")     # vacaciones pendientes
+    vac_valor: Optional[float] = Field(default=None, ge=0)                                # días o monto escrito (según el modo)
 
 
 class EmpresaPatch(BaseModel):

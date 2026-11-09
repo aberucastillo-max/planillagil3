@@ -153,14 +153,31 @@ class CalculoLiq:
     cts_anterior_aplica: bool = False
     cts_anterior_pagada: Optional[bool] = None
     faltantes: List[str] = field(default_factory=list)
+    simulacion: bool = False
 
 
 def _f(x) -> str:
     return str(x)
 
 
-def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: Optional[bool] = None) -> CalculoLiq:
-    """Calcula la liquidación del colaborador con los datos de HOY. No escribe en la base."""
+MODOS_VAC = ("FORMULA", "CERO", "DIAS", "MONTO")
+
+
+def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: Optional[bool] = None,
+             vac_modo: str = "FORMULA", vac_valor: Optional[Decimal] = None, excluir=None) -> CalculoLiq:
+    """Calcula la liquidación del colaborador con los datos de HOY. No escribe en la base.
+    Opciones (en tiempo real, no se guardan salvo las de vacaciones y la CTS al cerrar):
+      vac_modo   FORMULA (saldo del módulo Vacaciones) | CERO (no pagar pendientes) | DIAS (días escritos) | MONTO (monto escrito en S/)
+      excluir    claves de conceptos deshabilitados para SIMULAR (no se puede cerrar así)."""
+    excluir = set(excluir or [])
+    vac_modo = (vac_modo or "FORMULA").upper()
+    if vac_modo not in MODOS_VAC:
+        raise ErrorDeNegocio("Modo de vacaciones pendientes inválido (FORMULA, CERO, DIAS o MONTO).", 422)
+    if vac_modo in ("DIAS", "MONTO"):
+        if vac_valor is None:
+            raise ErrorDeNegocio("Escriba el valor de las vacaciones pendientes (días o monto).", 422)
+        if Decimal(str(vac_valor)) < 0:
+            raise ErrorDeNegocio("El valor de las vacaciones pendientes no puede ser negativo.", 422)
     if emp.fecha_cese is None:
         raise ErrorDeNegocio("El colaborador no tiene fecha de cese: dé primero de baja al colaborador.", 422)
     if not (periodo.fecha_inicio <= emp.fecha_cese <= periodo.fecha_fin):
@@ -181,11 +198,16 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     rc = sueldo + af + variables                                   # remuneración computable (sin 1/6 de gratificación)
     filas = out.filas
 
+    contador: Dict[str, int] = defaultdict(int)
+
     def add(codigo, monto, formula, cat=None):
         c = pr.conceptos[codigo]
         m = R.q2(monto)
         if m != 0:                                   # no se guardan renglones en cero (p. ej. comisión mixta mensual 0 %)
-            filas.append({"codigo": codigo, "categoria": cat or c.categoria, "monto": m, "formula": formula})
+            contador[codigo] += 1
+            clave = codigo if contador[codigo] == 1 else f"{codigo}:{contador[codigo]}"
+            filas.append({"codigo": codigo, "clave": clave, "categoria": cat or c.categoria, "monto": m, "formula": formula,
+                          "habilitado": clave not in excluir})
 
     # ---- gratificación trunca y su bonificación
     g_ini, _ = R.semestre_gratificacion(cese)
@@ -255,10 +277,28 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     venc, trunc = R.vacaciones_pendientes(ganados, usados, ay, pr["VAC_DIAS_ANIO"])
     anio_aniv = cese.year if (cese.month, cese.day) >= (ing.month, ing.day) else cese.year - 1
     per_trunca, per_venc = f"{anio_aniv}-{anio_aniv + 1}", f"{anio_aniv - 1}-{anio_aniv}"
-    if venc > 0:
-        add("@VACACIONES_VENCIDAS", R.pago_vacaciones(rc, venc, pr["VAC_DIAS_ANIO"]),
-            f"{rc} / {pr['VAC_DIAS_ANIO']:.0f} × {venc:.4f} días (de años completos sin gozar)")
+    pago_f = R.pago_vacaciones(rc, venc, pr["VAC_DIAS_ANIO"]) if venc > 0 else CERO
+    venc_f, venc_mostrado, monto_venc = venc, venc, pago_f
+    formula_v = f"{rc} / {pr['VAC_DIAS_ANIO']:.0f} × {venc_f:.4f} días (de años completos sin gozar)"
+    if vac_modo == "CERO":
+        venc_mostrado, monto_venc = CERO, CERO
+        if venc_f > 0:
+            avisos.append(f"Vacaciones pendientes deshabilitadas: no se pagan (por fórmula serían {venc_f:.4f} días = S/ {pago_f}).")
+    elif vac_modo == "DIAS":
+        venc_mostrado = Decimal(str(vac_valor))
+        monto_venc = R.pago_vacaciones(rc, venc_mostrado, pr["VAC_DIAS_ANIO"])
+        formula_v = f"{rc} / {pr['VAC_DIAS_ANIO']:.0f} × {venc_mostrado:.4f} días ESCRITOS manualmente (por fórmula: {venc_f:.4f} días)"
+        avisos.append(f"Vacaciones pendientes: días escritos manualmente ({venc_mostrado:.4f}); por fórmula serían {venc_f:.4f} días = S/ {pago_f}.")
+    elif vac_modo == "MONTO":
+        monto_venc = R.q2(Decimal(str(vac_valor)))
+        venc_mostrado = (monto_venc * pr["VAC_DIAS_ANIO"] / rc) if rc > 0 else CERO
+        formula_v = f"Monto ESCRITO manualmente S/ {monto_venc} (por fórmula: S/ {pago_f})"
+        avisos.append(f"Vacaciones pendientes: monto escrito manualmente (S/ {monto_venc}); por fórmula serían S/ {pago_f}.")
+    if venc_f > 0:
         avisos.append("Hay vacaciones vencidas: la posible indemnización vacacional NO se calcula (por validar).")
+    if monto_venc > 0:
+        add("@VACACIONES_VENCIDAS", monto_venc, formula_v)
+    venc = venc_mostrado
     if trunc > 0:
         add("@VACACIONES_TRUNCAS", R.pago_vacaciones(rc, trunc, pr["VAC_DIAS_ANIO"]),
             f"{rc} / {pr['VAC_DIAS_ANIO']:.0f} × {trunc:.4f} días del año en curso")
@@ -283,7 +323,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
                            f"tope {pr['INDEM_TOPE']:.0f} remuneraciones")
             add("@INDEMNIZACION_DESPIDO", total, formula)
 
-    afecta = lambda f, flag: f["categoria"] == "INGRESO" and getattr(pr.conceptos[f["codigo"]], flag)
+    afecta = lambda f, flag: f["habilitado"] and f["categoria"] == "INGRESO" and getattr(pr.conceptos[f["codigo"]], flag)
     base_afp = sum((f["monto"] for f in filas if afecta(f, "afecta_afp_onp")), CERO)
     base_ess = sum((f["monto"] for f in filas if afecta(f, "afecta_essalud")), CERO)
     base_5ta = sum((f["monto"] for f in filas if afecta(f, "afecta_5ta_regular")), CERO)
@@ -328,13 +368,20 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     dif_ess, dif_eps = R.essalud_diferencial(res.base_essalud, base_ess, rmv_min, pr["ESSALUD_TASA"],
                                              pr["CREDITO_EPS_TASA"], emp.cobertura_eps)
 
-    out.total_ingresos = sum((f["monto"] for f in filas if f["categoria"] == "INGRESO"), CERO)
-    out.total_descuentos = sum((f["monto"] for f in filas if f["categoria"] == "DESCUENTO"), CERO)
+    out.total_ingresos = sum((f["monto"] for f in filas if f["habilitado"] and f["categoria"] == "INGRESO"), CERO)
+    out.total_descuentos = sum((f["monto"] for f in filas if f["habilitado"] and f["categoria"] == "DESCUENTO"), CERO)
     out.neto = out.total_ingresos - out.total_descuentos
     out.base_previsional, out.base_essalud, out.base_5ta, out.ret_5ta_ajuste = base_afp, base_ess, base_5ta, ajuste
     out.aporte_essalud, out.aporte_eps = dif_ess, dif_eps
 
     out.faltantes = faltantes_para_cerrar(emp, out.cts_anterior_aplica, out.cts_anterior_pagada)
+    out.simulacion = bool(excluir)
+    if excluir:
+        out.faltantes.append("Hay conceptos deshabilitados (SIMULACIÓN para pruebas): vuelva a habilitarlos para poder cerrar la liquidación.")
+        avisos.append("SIMULACIÓN: hay conceptos deshabilitados; los totales no corresponden a la liquidación real.")
+        if "@CTS_TRUNCA" in excluir: cts_info = None
+        if "@CTS_TRUNCA:2" in excluir: cts_ant_info = None
+        if "@GRATIFICACION" in excluir: grat_info = None
     out.snapshot = {
         "colaborador": f"{emp.apellidos}, {emp.nombres}", "documento": emp.documento_identidad, "puesto": emp.puesto,
         "sede": emp.sede, "categoria": emp.categoria, "area": emp.area, "centro_costo": emp.centro_costo,
@@ -345,6 +392,11 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
         "rc_cts": _f(rc_cts), "cts": cts_info, "cts_anterior": cts_ant_info, "gratificacion": grat_info,
         "vacaciones": {"ganados": f"{ganados:.4f}", "usados": _f(usados), "vencidas": f"{venc:.4f}", "truncas": f"{trunc:.4f}",
                        "periodo_vencidas": per_venc, "periodo_truncas": per_trunca},
+        "opciones": {"vacaciones_pendientes": {"modo": vac_modo, "valor": None if vac_valor is None else _f(vac_valor),
+                                               "formula_dias": f"{venc_f:.4f}", "formula_monto": _f(pago_f)},
+                     "cts_anterior_pagada": out.cts_anterior_pagada, "excluidos": sorted(excluir)},
+        "simulacion": bool(excluir),
+        "regla_quinta": "Cesado: la retención regular de 5ta del mes del cese no se aplica en la boleta; se aplica completa en esta liquidación.",
         "pension": pension,
         "essalud": {"base": _f(base_ess), "con_eps": bool(emp.cobertura_eps), "tasa_essalud_pct": _f(
             (pr["ESSALUD_TASA"] - pr["CREDITO_EPS_TASA"] if emp.cobertura_eps else pr["ESSALUD_TASA"]) * 100),
@@ -368,7 +420,8 @@ def faltantes_para_cerrar(emp: Empleado, cts_aplica: bool, cts_pagada: Optional[
 
 
 # ------------------------------------------------------------------ cierre definitivo (lo único que se guarda)
-def cerrar(db: Session, periodo: Periodo, emp: Empleado, cuenta_id: int, cts_anterior_pagada: Optional[bool]) -> Liquidacion:
+def cerrar(db: Session, periodo: Periodo, emp: Empleado, cuenta_id: int, cts_anterior_pagada: Optional[bool],
+           vac_modo: str = "FORMULA", vac_valor: Optional[Decimal] = None) -> Liquidacion:
     if periodo.estado == "CERRADO":
         raise ErrorDeNegocio("El periodo del cese está CERRADO: reábralo con motivo antes de cerrar la liquidación "
                              "(la alternativa de pasarla al periodo siguiente está pendiente de la decisión del contador).", 409)
@@ -376,7 +429,7 @@ def cerrar(db: Session, periodo: Periodo, emp: Empleado, cuenta_id: int, cts_ant
                                       Liquidacion.fecha_cese == emp.fecha_cese).first()
     if ya:
         raise ErrorDeNegocio("La liquidación ya está CERRADA.", 409)
-    calc = calcular(db, periodo, emp, cts_anterior_pagada)
+    calc = calcular(db, periodo, emp, cts_anterior_pagada, vac_modo, vac_valor)
     if calc.faltantes:
         raise ErrorDeNegocio("No se puede cerrar: " + " ".join(calc.faltantes), 409)
     if calc.total_ingresos - calc.total_descuentos != calc.neto:
@@ -390,7 +443,7 @@ def cerrar(db: Session, periodo: Periodo, emp: Empleado, cuenta_id: int, cts_ant
         avisos=calc.avisos, snapshot=calc.snapshot, calculado_en=datetime.now(timezone.utc), cerrado_en=datetime.now(timezone.utc))
     db.add(liq)
     db.flush()
-    for i, f in enumerate(calc.filas):
+    for i, f in enumerate([x for x in calc.filas if x["habilitado"]]):
         db.add(LiquidacionDetalle(liquidacion_id=liq.id, orden=i, concepto_codigo=f["codigo"], categoria=f["categoria"],
                                   monto=f["monto"], formula=f["formula"]))
     db.add(Auditoria(cuenta_id=cuenta_id, empresa_id=periodo.empresa_id, accion="CERRAR_LIQUIDACION",

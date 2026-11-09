@@ -706,9 +706,28 @@ def _doc_calculo(db: Session, periodo: Periodo, emp: Empleado, calc) -> dict:
             "total_descuentos": calc.total_descuentos, "neto_a_pagar": calc.neto, "ret_5ta_ajuste": calc.ret_5ta_ajuste,
             "aporte_essalud": calc.aporte_essalud, "aporte_eps": calc.aporte_eps, "avisos": calc.avisos,
             "faltantes_para_cerrar": calc.faltantes, "puede_cerrar": not calc.faltantes and periodo.estado == "ABIERTO",
-            "snapshot": calc.snapshot,
-            "conceptos": [{"codigo": f["codigo"], "descripcion": desc.get(f["codigo"], ""), "categoria": f["categoria"],
+            "simulacion": calc.simulacion, "snapshot": calc.snapshot,
+            "conceptos": [{"codigo": f["codigo"], "clave": f["clave"], "habilitado": f["habilitado"],
+                           "descripcion": desc.get(f["codigo"], ""), "categoria": f["categoria"],
                            "monto": f["monto"], "formula": f["formula"]} for f in calc.filas]}
+
+
+def _conceptos_cerrada(db: Session, liq: Liquidacion, desc: dict) -> list:
+    visto: dict = {}
+    filas = []
+    for d in db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id).order_by(LiquidacionDetalle.orden):
+        visto[d.concepto_codigo] = visto.get(d.concepto_codigo, 0) + 1
+        clave = d.concepto_codigo if visto[d.concepto_codigo] == 1 else f"{d.concepto_codigo}:{visto[d.concepto_codigo]}"
+        filas.append({"codigo": d.concepto_codigo, "clave": clave, "habilitado": True, "descripcion": desc.get(d.concepto_codigo, ""),
+                      "categoria": d.categoria, "monto": d.monto, "formula": d.formula})
+    return filas
+
+
+def _opciones_liq(cts_anterior_pagada: Optional[bool] = None, vac_modo: str = Query("FORMULA", pattern="^(FORMULA|CERO|DIAS|MONTO)$"),
+                  vac_valor: Optional[float] = Query(None, ge=0), excluir: Optional[str] = None) -> dict:
+    """Opciones de la liquidación que se recalculan EN TIEMPO REAL (no se guardan, salvo al cerrar)."""
+    return {"cts": cts_anterior_pagada, "vac_modo": vac_modo, "vac_valor": None if vac_valor is None else Decimal(str(vac_valor)),
+            "excluir": [x for x in (excluir or "").split(",") if x]}
 
 
 def _doc_cerrada(db: Session, liq: Liquidacion, emp: Empleado) -> dict:
@@ -720,14 +739,11 @@ def _doc_cerrada(db: Session, liq: Liquidacion, emp: Empleado) -> dict:
             "cts_anterior_aplica": emp.fecha_ingreso <= a_fin, "cts_anterior_pagada": liq.cts_anterior_pagada,
             "total_ingresos": liq.total_ingresos, "total_descuentos": liq.total_descuentos, "neto_a_pagar": liq.neto_a_pagar,
             "ret_5ta_ajuste": liq.ret_5ta_ajuste, "aporte_essalud": liq.aporte_essalud, "aporte_eps": liq.aporte_eps,
-            "avisos": liq.avisos or [], "faltantes_para_cerrar": [], "puede_cerrar": False, "snapshot": liq.snapshot,
-            "conceptos": [{"codigo": d.concepto_codigo, "descripcion": desc.get(d.concepto_codigo, ""), "categoria": d.categoria,
-                           "monto": d.monto, "formula": d.formula}
-                          for d in db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id)
-                          .order_by(LiquidacionDetalle.orden)]}
+            "avisos": liq.avisos or [], "faltantes_para_cerrar": [], "puede_cerrar": False, "simulacion": False,
+            "snapshot": liq.snapshot, "conceptos": _conceptos_cerrada(db, liq, desc)}
 
 
-def _documento(db: Session, empresa: Empresa, periodo_id: int, empleado_id: int, cts_pagada: Optional[bool]) -> dict:
+def _documento(db: Session, empresa: Empresa, periodo_id: int, empleado_id: int, opc: dict) -> dict:
     """La liquidación CERRADA (guardada) si existe; si no, el cálculo de hoy sin guardar."""
     emp = _empleado(db, empresa, empleado_id)
     if emp.fecha_cese is None:
@@ -737,7 +753,7 @@ def _documento(db: Session, empresa: Empresa, periodo_id: int, empleado_id: int,
     if liq:
         return _doc_cerrada(db, liq, emp)
     periodo = _periodo(db, empresa, periodo_id)
-    return _doc_calculo(db, periodo, emp, L.calcular(db, periodo, emp, cts_pagada))
+    return _doc_calculo(db, periodo, emp, L.calcular(db, periodo, emp, opc["cts"], opc["vac_modo"], opc["vac_valor"], opc["excluir"]))
 
 
 @app.get(API + "/empresas/{empresa_id}/liquidaciones")
@@ -752,26 +768,28 @@ def listar_liquidaciones(periodo_id: int, estado: Optional[str] = Query(None, pa
 
 
 @app.get(API + "/empresas/{empresa_id}/liquidaciones/vista")
-def ver_liquidacion(periodo_id: int, empleado_id: int, cts_anterior_pagada: Optional[bool] = None,
+def ver_liquidacion(periodo_id: int, empleado_id: int, opc: dict = Depends(_opciones_liq),
                     empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
-    """«Ver»: calcula al momento (sin guardar nada) o muestra la liquidación cerrada."""
-    return _documento(db, empresa, periodo_id, empleado_id, cts_anterior_pagada)
+    """«Ver»: calcula al momento y en tiempo real (sin guardar nada) o muestra la liquidación cerrada."""
+    return _documento(db, empresa, periodo_id, empleado_id, opc)
 
 
 @app.get(API + "/empresas/{empresa_id}/liquidaciones/pdf")
-def pdf_de_liquidacion(periodo_id: int, empleado_id: int, cts_anterior_pagada: Optional[bool] = None, formulas: bool = False,
-                       firmas: bool = True, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+def pdf_de_liquidacion(periodo_id: int, empleado_id: int, formulas: bool = False, firmas: bool = True,
+                       opc: dict = Depends(_opciones_liq), empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """PDF con el formato de la empresa. Sin cerrar, sale como BORRADOR y no se guarda nada."""
-    doc = _documento(db, empresa, periodo_id, empleado_id, cts_anterior_pagada)
+    doc = _documento(db, empresa, periodo_id, empleado_id, opc)
+    doc["conceptos"] = [c for c in doc["conceptos"] if c.get("habilitado", True)]
     contenido = pdf_liquidacion.generar_pdf(empresa, doc, formulas, firmas)
     nombre = f"LIQUIDACION_{empresa.ruc}_{doc['documento']}_{doc['periodo']['anio']}-{doc['periodo']['mes']:02d}" + ("" if doc["estado"] == "CERRADA" else "_BORRADOR")
     return Response(contenido, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={nombre}.pdf"})
 
 
 @app.get(API + "/empresas/{empresa_id}/liquidaciones/excel")
-def excel_de_liquidacion(periodo_id: int, empleado_id: int, cts_anterior_pagada: Optional[bool] = None,
+def excel_de_liquidacion(periodo_id: int, empleado_id: int, opc: dict = Depends(_opciones_liq),
                          empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
-    doc = _documento(db, empresa, periodo_id, empleado_id, cts_anterior_pagada)
+    doc = _documento(db, empresa, periodo_id, empleado_id, opc)
+    doc["conceptos"] = [c for c in doc["conceptos"] if c.get("habilitado", True)]
     contenido = pdf_liquidacion.generar_excel(empresa, doc)
     nombre = f"LIQUIDACION_{empresa.ruc}_{doc['documento']}_{doc['periodo']['anio']}-{doc['periodo']['mes']:02d}" + ("" if doc["estado"] == "CERRADA" else "_BORRADOR")
     return Response(contenido, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -784,7 +802,8 @@ def cerrar_liquidacion(data: LiquidacionCerrarIn, empresa: Empresa = Depends(emp
     """Cierre DEFINITIVO: lo único que se guarda. Desde aquí viaja al AFPnet, al PLAME y a los resúmenes."""
     periodo = _periodo(db, empresa, data.periodo_id)
     emp = _empleado(db, empresa, data.empleado_id)
-    liq = L.cerrar(db, periodo, emp, cuenta.id, data.cts_anterior_pagada)
+    liq = L.cerrar(db, periodo, emp, cuenta.id, data.cts_anterior_pagada, data.vac_modo,
+                   None if data.vac_valor is None else Decimal(str(data.vac_valor)))
     return _doc_cerrada(db, liq, emp)
 
 
