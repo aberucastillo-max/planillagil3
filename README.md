@@ -44,6 +44,27 @@ pytest
 Abra `planilla_agil_frontend_v2.html` (en CodePen o publicado), pulse el engranaje de la cabecera, pegue la URL de la API y la clave
 que imprimió `crear-cuenta`. Sin esos datos el HTML funciona en modo demo. La clave se guarda solo en sessionStorage.
 
+## Liquidación por cese (etapa 2)
+Módulo `Liquidaciones`: cesados del periodo, procesar desde el listado de ceses del mes, ABIERTA (calculada) y CERRADA,
+cierre que bloquea la boleta del colaborador, ajuste final de 5ta, topes aplicados una vez sobre la base del mes y PDF.
+AFPnet y PLAME salen en **un solo archivo por periodo**: la liquidación CERRADA se suma a la boleta del mes.
+Endpoints: `GET/POST /empresas/{id}/liquidaciones`, `GET/PATCH /liquidaciones/{id}`, `POST .../cerrar`, `POST .../reabrir`,
+`DELETE .../{id}` (solo ABIERTA), `GET .../{id}/pdf`. Fórmulas y supuestos: documento «Propuesta de lógica» y documento de control.
+Al arrancar, la API agrega sola las columnas y los parámetros nuevos (idempotente).
+
+## Beneficios semestrales y reingreso (etapa 3)
+- **Gratificación:** las boletas de julio y diciembre la calculan solas (semestre anterior, meses completos, más la
+  bonificación extraordinaria); una novedad manual de `@GRATIFICACION` tiene prioridad. Parámetro `GRATIFICACION_AUTOMATICA` (1/0).
+- **CTS semestral:** `POST /empresas/{id}/cts-semestral/calcular` (NOV = mayo-octubre, MAY = noviembre-abril), `GET`, `depositar`,
+  `revertir` y `exportar` (Excel). Lo depositado no se recalcula y se da por pagado en la liquidación posterior.
+- **Reingreso:** `POST /empresas/{id}/empleados/{id}/reingreso` abre un nuevo ciclo y conserva el historial (`GET .../vinculos`).
+
+## Administrador del software (pruebas)
+Con el código de instalación (`ADMIN_TOKEN`; si no existe, `SETUP_TOKEN`) se entra como **administrador**: en el engranaje del HTML
+elija «Administrador». Ve todas las cuentas y todos los RUC, crea cuentas (devuelve su clave una sola vez) y empresas en la cuenta que
+elija, y trabaja en cualquier empresa respetando el plan de su cuenta. Rutas: `GET/POST /api/v1/admin/cuentas`, `PATCH /api/v1/admin/cuentas/{id}`.
+Es un acceso total: úselo solo en pruebas o con un `ADMIN_TOKEN` propio y secreto; cuando haya login con usuarios, se reemplaza.
+
 ## Antes de producción (pendiente)
 Gratificación, CTS, utilidades y liquidación · asiento contable y boletas PDF · reingreso (ciclos laborales) ·
 saldo vacacional · login con usuarios (hoy API key por cuenta) · migraciones con Alembic ·

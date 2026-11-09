@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from . import reglas as R
 from .diccionario import ErrorDeNegocio, cargar_parametros
+from . import liquidacion as L
 from .models import Ausentismo, Detalle, Empleado, Empresa, Periodo, Resultado, TipoSuspension
 
 AFPNET_EXC_SUBSIDIO_TOTAL = "U"      # TODO validar contra AFPnet
@@ -25,12 +26,14 @@ def _resultados(db: Session, periodo: Periodo):
 def afpnet_filas(db: Session, empresa: Empresa, periodo: Periodo):
     vac_ids = {d.empleado_id for d in db.query(Detalle.empleado_id).filter(
         Detalle.periodo_id == periodo.id, Detalle.concepto_codigo == "@REMUNERA_VACACIONAL")}
+    cerradas, _ = L.consolidado(db, periodo)
     filas, sec = [], 1
     for res, emp in _resultados(db, periodo):
         if emp.sistema_pensionario != "AFP":
             continue
         partes = emp.apellidos.strip().split(" ", 1)
-        exc, remun = "", R.D(res.base_previsional)
+        remun = R.D(res.base_previsional) + cerradas.get(emp.id, {}).get("base_previsional", R.CERO)   # boleta + liquidación
+        exc = ""
         if res.dias_subsidio >= 30:
             exc, remun = AFPNET_EXC_SUBSIDIO_TOTAL, R.CERO
         elif res.dias_trabajados == 0 and emp.id not in vac_ids:
@@ -79,13 +82,31 @@ def plame_zip(db: Session, empresa: Empresa, periodo: Periodo):
         dias = R.dias_calendario_solapados(aus.fecha_inicio, aus.fecha_fin, periodo.fecha_inicio, periodo.fecha_fin)
         snl.append(f"01|{emp.documento_identidad.strip()}|{ts.codigo_plame}|{dias}|")
 
-    rem = []
+    cerradas, _ = L.consolidado(db, periodo)
     docs = {e.id: e.documento_identidad.strip() for e in db.query(Empleado).filter(Empleado.empresa_id == empresa.id)}
+    acum = {}          # (empleado, código PLAME) -> monto
+    sin_codigo = set()
+
+    def sumar(emp_id, codigo, categoria, monto):
+        c = pr.conceptos.get(codigo)
+        if not c or categoria not in ("INGRESO", "DESCUENTO"):
+            return
+        if not c.codigo_plame:
+            if monto != 0:
+                sin_codigo.add(codigo)
+            return
+        acum[(emp_id, c.codigo_plame)] = acum.get((emp_id, c.codigo_plame), R.CERO) + R.D(monto)
+
     for d in db.query(Detalle).filter(Detalle.periodo_id == periodo.id).order_by(Detalle.empleado_id):
-        c = pr.conceptos.get(d.concepto_codigo)
-        if c and c.codigo_plame and d.monto > 0 and c.categoria in ("INGRESO", "DESCUENTO"):
-            m = f"{R.D(d.monto):.2f}"
-            rem.append(f"01|{docs[d.empleado_id]}|{c.codigo_plame}|{m}|{m}|")
+        sumar(d.empleado_id, d.concepto_codigo, d.categoria, d.monto)
+    for emp_id, datos in cerradas.items():
+        for codigo, categoria, monto in datos["lineas"]:
+            sumar(emp_id, codigo, categoria, monto)
+    rem = []
+    for (emp_id, codigo), monto in sorted(acum.items(), key=lambda kv: (docs.get(kv[0][0], ""), kv[0][1])):
+        if monto > 0:
+            m = f"{monto:.2f}"
+            rem.append(f"01|{docs[emp_id]}|{codigo}|{m}|{m}|")
 
     def txt(lineas):
         return ("\r\n".join(lineas) + ("\r\n" if lineas else "")).encode("latin-1", errors="replace")
@@ -95,4 +116,10 @@ def plame_zip(db: Session, empresa: Empresa, periodo: Periodo):
         zf.writestr(f"{prefijo}.jor", txt(jor))
         zf.writestr(f"{prefijo}.snl", txt(snl))
         zf.writestr(f"{prefijo}.rem", txt(rem))
-    return buf.getvalue(), prefijo
+    return buf.getvalue(), prefijo, sorted(sin_codigo)
+
+
+def avisos_consolidacion(db: Session, periodo: Periodo):
+    """Liquidaciones ABIERTAS del periodo: no entran al consolidado hasta cerrarse."""
+    cerradas, abiertas = L.consolidado(db, periodo)
+    return {"incluidas": len(cerradas), "abiertas": abiertas}

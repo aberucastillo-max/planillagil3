@@ -101,11 +101,20 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
             raise ErrorDeNegocio(f"{n.concepto_codigo} lo calcula el motor; no admite carga manual.", 422)
         novedades[n.empleado_id][n.concepto_codigo] = D(n.valor)
 
-    db.query(Detalle).filter(Detalle.periodo_id == periodo.id).delete()
-    db.query(Resultado).filter(Resultado.periodo_id == periodo.id).delete()
+    from .liquidacion import bloqueados_del_periodo     # import local: liquidacion importa este módulo
+    bloqueados = bloqueados_del_periodo(db, periodo.id)  # liquidación CERRADA => su boleta queda intacta
+    q_det = db.query(Detalle).filter(Detalle.periodo_id == periodo.id)
+    q_res = db.query(Resultado).filter(Resultado.periodo_id == periodo.id)
+    if bloqueados:
+        q_det = q_det.filter(Detalle.empleado_id.notin_(bloqueados))
+        q_res = q_res.filter(Resultado.empleado_id.notin_(bloqueados))
+    q_det.delete(synchronize_session=False)
+    q_res.delete(synchronize_session=False)
 
     alertas: List[str] = []
     for emp in empleados:
+        if emp.id in bloqueados:
+            continue
         nombre = f"{emp.apellidos}, {emp.nombres}"
         nov = novedades.get(emp.id, {})
         sueldo = sueldos[emp.id]
@@ -177,6 +186,14 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
                 continue
             add(cod, val, "Novedad cargada", origen="NOVEDAD")
 
+        # ---- gratificación y bonificación de julio y diciembre (si el usuario no las cargó como novedad)
+        if "@GRATIFICACION" not in nov and "@BONIF_EXTRA_29351" not in nov:
+            from .semestrales import gratificacion_automatica     # import local: semestrales importa este módulo
+            g = gratificacion_automatica(db, emp, periodo, pr)
+            if g:
+                add("@GRATIFICACION", g["grat"], g["formula"])
+                add("@BONIF_EXTRA_29351", g["bonif"], g["formula_bonif"])
+
         # ---- bolsas acumuladoras
         base_prev, base_ess = bolsa("afecta_afp_onp"), bolsa("afecta_essalud")
         base_5ta, base_dir = bolsa("afecta_5ta_regular"), bolsa("afecta_5ta_directa")
@@ -186,10 +203,11 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
             afp = pr.afps.get((emp.afp_nombre or "").upper())
             if afp is None:
                 raise ErrorDeNegocio(f"{nombre}: AFP '{emp.afp_nombre}' no existe en el Diccionario.", 422)
-            ap, co, pri = R.calcular_afp(base_prev, afp.aporte, afp.comision, afp.prima, afp.tope_prima)
+            tope_prima = pr.p.get("RMA_PRIMA", afp.tope_prima)        # remuneración máxima asegurable vigente (Diccionario)
+            ap, co, pri = R.calcular_afp(base_prev, afp.aporte, afp.comision, afp.prima, tope_prima)
             add("@FONDO_PENSIONES", ap, f"{base_prev} x {afp.aporte}")
             add("@COMISION_VARIABLE", co, f"{base_prev} x {afp.comision}")
-            add("@SEGURO_INVALIDEZ", pri, f"min({base_prev}, tope {afp.tope_prima}) x {afp.prima}")
+            add("@SEGURO_INVALIDEZ", pri, f"min({base_prev}, tope {tope_prima}) x {afp.prima}")
             if not emp.cuspp:
                 alertas.append(f"{nombre}: falta CUSPP (AFPnet).")
         else:
@@ -214,9 +232,10 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
         add("@DESCUENTO_EPS", eps, "Beneficio EPS vigente")
 
         # ---- aportes del empleador (siempre separados)
-        ess, aeps = R.calcular_essalud(base_ess, pr["RMV"], pr["ESSALUD_TASA"], pr["CREDITO_EPS_TASA"],
+        rmv_min = R.rmv_minima_essalud(pr["RMV"], subs)          # mínimo = RMV, prorrateado por días de subsidio
+        ess, aeps = R.calcular_essalud(base_ess, rmv_min, pr["ESSALUD_TASA"], pr["CREDITO_EPS_TASA"],
                                        emp.cobertura_eps)
-        add("@ESSALUD", ess, f"base {base_ess} (mín. RMV)")
+        add("@ESSALUD", ess, f"base {base_ess} (mín. {rmv_min})")
         add("@APORTE_EPS", aeps, "Crédito EPS")
 
         # ---- totales
@@ -244,7 +263,8 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
                       "diccionario": f"{dic.codigo} v{dic.version}",
                       "parametros": {k: str(v) for k, v in pr.p.items()}}))
     db.commit()
-    return {"colaboradores": len(empleados), "alertas": alertas}
+    return {"colaboradores": len(empleados) - len(bloqueados & {e.id for e in empleados}), "alertas": alertas,
+            "bloqueados_por_liquidacion": len(bloqueados & {e.id for e in empleados})}
 
 
 def cerrar_periodo(db: Session, periodo: Periodo, cuenta_id: int):

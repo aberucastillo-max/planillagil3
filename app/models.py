@@ -152,6 +152,9 @@ class Empleado(Base):
     asignacion_familiar = Column(Boolean, nullable=False, default=False)
     cobertura_eps = Column(Boolean, nullable=False, default=False)
     estado = Column(String(10), nullable=False, default="ACTIVO")
+    tipo_contrato = Column(String(12), nullable=False, default="INDEFINIDO")   # INDEFINIDO | PLAZO_FIJO
+    fecha_fin_contrato = Column(Date)                                          # solo plazo fijo
+    clase_despido = Column(String(12))                                         # JUSTIFICADO | ARBITRARIO | NULO (si el motivo es 02)
     __table_args__ = (
         UniqueConstraint("empresa_id", "tipo_documento", "documento_identidad", name="uq_emp_doc"),
         Index("ix_emp_empresa", "empresa_id", "estado"),
@@ -271,3 +274,79 @@ class Resultado(Base):
     horas_extras = Column(Numeric(8, 2), nullable=False, default=0)
     snapshot = Column(JSON)   # datos del colaborador y reglas usadas al calcular (reproducible aunque cambien después)
     __table_args__ = (UniqueConstraint("periodo_id", "empleado_id", name="uq_resultado"),)
+
+
+# ----------------------------------------------------------------- liquidaciones por cese
+class Liquidacion(Base):
+    """Una liquidación por colaborador cesado y periodo (el del mes del cese). Estados: ABIERTA (calculada) y CERRADA.
+    SIN INICIAR no es un registro: es un cesado del periodo que aún no tiene fila aquí."""
+    __tablename__ = "liquidaciones"
+    id = Column(Integer, primary_key=True)
+    periodo_id = Column(Integer, ForeignKey("periodos.id"), nullable=False, index=True)
+    empleado_id = Column(Integer, ForeignKey("empleados.id"), nullable=False, index=True)
+    estado = Column(String(10), nullable=False, default="ABIERTA")
+    fecha_cese = Column(Date, nullable=False)
+    motivo_cese = Column(String(5))
+    clase_despido = Column(String(12))
+    tipo_contrato = Column(String(12))
+    fecha_fin_contrato = Column(Date)
+    cts_anterior_pagada = Column(Boolean)           # NULL = sin responder; no se puede cerrar así
+    total_ingresos = Column(Numeric(12, 2), nullable=False, default=0)
+    total_descuentos = Column(Numeric(12, 2), nullable=False, default=0)   # puede ser negativo (devolución de 5ta)
+    neto_a_pagar = Column(Numeric(12, 2), nullable=False, default=0)
+    base_previsional = Column(Numeric(12, 2), nullable=False, default=0)  # conceptos de la liquidación afectos a AFP/ONP
+    base_essalud = Column(Numeric(12, 2), nullable=False, default=0)
+    base_5ta = Column(Numeric(12, 2), nullable=False, default=0)
+    ret_5ta_ajuste = Column(Numeric(12, 2), nullable=False, default=0)    # + retiene, - devuelve
+    aporte_essalud = Column(Numeric(12, 2), nullable=False, default=0)    # diferencial del empleador (informativo)
+    aporte_eps = Column(Numeric(12, 2), nullable=False, default=0)
+    avisos = Column(JSON)
+    snapshot = Column(JSON)
+    creado_en = Column(DateTime(timezone=True), default=_now)
+    calculado_en = Column(DateTime(timezone=True))
+    cerrado_en = Column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("periodo_id", "empleado_id", name="uq_liquidacion"),)
+
+
+class LiquidacionDetalle(Base):
+    __tablename__ = "liquidacion_detalle"
+    id = Column(Integer, primary_key=True)
+    liquidacion_id = Column(Integer, ForeignKey("liquidaciones.id"), nullable=False, index=True)
+    orden = Column(Integer, nullable=False, default=0)
+    concepto_codigo = Column(String(50), nullable=False)
+    categoria = Column(String(12), nullable=False)
+    monto = Column(Numeric(12, 2), nullable=False)
+    formula = Column(Text)
+
+
+# ----------------------------------------------------------------- beneficios semestrales y reingreso (etapa 3)
+class CtsDeposito(Base):
+    """CTS semestral por colaborador. NOV = semestre mayo-octubre (depósito de noviembre);
+    MAY = semestre noviembre-abril (depósito de mayo). CALCULADA -> DEPOSITADA (lo marca el usuario)."""
+    __tablename__ = "cts_depositos"
+    id = Column(Integer, primary_key=True)
+    empresa_id = Column(Integer, ForeignKey("empresas.id"), nullable=False, index=True)
+    empleado_id = Column(Integer, ForeignKey("empleados.id"), nullable=False, index=True)
+    sem_inicio = Column(Date, nullable=False)
+    sem_fin = Column(Date, nullable=False)
+    meses = Column(Integer, nullable=False, default=0)
+    dias = Column(Integer, nullable=False, default=0)
+    remuneracion_computable = Column(Numeric(12, 2), nullable=False)
+    monto = Column(Numeric(12, 2), nullable=False)
+    estado = Column(String(12), nullable=False, default="CALCULADA")
+    fecha_deposito = Column(Date)
+    snapshot = Column(JSON)
+    calculado_en = Column(DateTime(timezone=True), default=_now)
+    __table_args__ = (UniqueConstraint("empleado_id", "sem_inicio", name="uq_cts_empleado_semestre"),)
+
+
+class Vinculo(Base):
+    """Ciclos laborales anteriores de un colaborador (se guarda al reingresar)."""
+    __tablename__ = "vinculos_anteriores"
+    id = Column(Integer, primary_key=True)
+    empleado_id = Column(Integer, ForeignKey("empleados.id"), nullable=False, index=True)
+    fecha_ingreso = Column(Date, nullable=False)
+    fecha_cese = Column(Date, nullable=False)
+    motivo_cese = Column(String(5))
+    clase_despido = Column(String(12))
+    creado_en = Column(DateTime(timezone=True), default=_now)

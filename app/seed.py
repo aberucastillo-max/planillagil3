@@ -93,6 +93,7 @@ SUSPENSIONES = [  # códigos tal como figuran en el Registro Maestro; validar co
 def sembrar_rg728(db: Session) -> Diccionario:
     dic = db.query(Diccionario).filter_by(codigo="RG_728", version=1).first()
     if dic:
+        completar_rg728(db)
         return dic
     dic = Diccionario(codigo="RG_728", nombre="Régimen General (D.Leg. 728)", version=1, vigente_desde=DESDE)
     db.add(dic)
@@ -112,4 +113,54 @@ def sembrar_rg728(db: Session) -> Diccionario:
     for cod, desc, tipo, conc in SUSPENSIONES:
         db.add(TipoSuspension(diccionario_id=dic.id, codigo_plame=cod, descripcion=desc, tipo=tipo, concepto_codigo=conc))
     db.commit()
+    completar_rg728(db)
     return dic
+
+
+# ------------------------------------------------------------------ liquidación por cese (etapa 2)
+# Los valores marcados 'validar' son los de la propuesta aprobada y siguen POR VALIDAR con contador / norma.
+PARAMETROS_LIQUIDACION = [  # clave, valor, desde, hasta, nota
+    ("BONIF_EXTRA_PCT", "0.09", DESDE, None, "bonificación extraordinaria sobre la gratificación (validar)"),
+    ("BONIF_EXTRA_EPS_PCT", "0.0675", DESDE, None, "con EPS (validar)"),
+    ("GRATI_DIVISOR", "6", DESDE, None, "gratificación trunca = RC / 6 por mes completo (validar)"),
+    ("CTS_DIVISOR_MES", "12", DESDE, None, "CTS = RC / 12 por mes completo (validar)"),
+    ("CTS_DIVISOR_DIA", "360", DESDE, None, "CTS = RC / 360 por día (validar)"),
+    ("VAC_DIAS_ANIO", "30", DESDE, None, "30 días por año; 2.5 por mes (validar)"),
+    ("INDEM_FACTOR", "1.5", DESDE, None, "1.5 remuneraciones por año (validar)"),
+    ("INDEM_TOPE", "12", DESDE, None, "tope de 12 remuneraciones (validar)"),
+    ("REGULARIDAD_MESES", "3", DESDE, None, "un variable es regular si aparece en 3 meses o más (validar)"),
+    ("PROMEDIO_MESES", "6", DESDE, None, "ventana de meses para promediar variables (validar)"),
+    ("GRATIFICACION_AUTOMATICA", "1", DESDE, None, "1 = julio y diciembre calculan la gratificación sola; 0 = solo por novedad"),
+    ("RMA_PRIMA", "12209.11", date(2026, 1, 1), date(2026, 3, 31), "SBS, 1.er trimestre 2026 (validar)"),
+    ("RMA_PRIMA", "12598.91", date(2026, 4, 1), date(2026, 6, 30), "SBS, 2.º trimestre 2026 (validar)"),
+    ("RMA_PRIMA", "12672.65", date(2026, 7, 1), date(2026, 9, 30), "SBS, 3.er trimestre 2026 (validar)"),
+    ("RMA_PRIMA", "12732.70", date(2026, 10, 1), date(2026, 12, 31), "SBS, 4.º trimestre 2026; fuente secundaria (validar)"),
+]
+
+# codigo, descripcion, categoria, naturaleza, calculado, afp_onp, 5ta_reg, 5ta_dir, essalud, codigo_plame
+CONCEPTOS_LIQUIDACION = [
+    ("@CTS_TRUNCA", "CTS trunca", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
+    ("@VACACIONES_VENCIDAS", "Vacaciones vencidas no gozadas", "INGRESO", "FORMULA", True, 1, 1, 0, 1, "0118"),
+    ("@VACACIONES_TRUNCAS", "Vacaciones truncas", "INGRESO", "FORMULA", True, 1, 1, 0, 1, "0118"),
+    ("@INDEMNIZACION_DESPIDO", "Indemnización por despido arbitrario", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
+]
+
+
+def completar_rg728(db: Session) -> None:
+    """Agrega, sin duplicar, los parámetros y conceptos de la liquidación al Diccionario RG_728 v1 (idempotente)."""
+    dic = db.query(Diccionario).filter_by(codigo="RG_728", version=1).first()
+    if not dic:
+        return
+    existentes = {(p.clave, p.vigente_desde) for p in
+                  db.query(DiccionarioParametro).filter(DiccionarioParametro.diccionario_id == dic.id)}
+    for clave, valor, desde, hasta, nota in PARAMETROS_LIQUIDACION:
+        if (clave, desde) not in existentes:
+            db.add(DiccionarioParametro(diccionario_id=dic.id, clave=clave, valor=Decimal(valor),
+                                        vigente_desde=desde, vigente_hasta=hasta, nota=nota))
+    codigos = {c.codigo for c in db.query(Concepto).filter(Concepto.diccionario_id == dic.id)}
+    for cod, desc, cat, nat, calc, afp, r5, d5, ess, plame in CONCEPTOS_LIQUIDACION:
+        if cod not in codigos:
+            db.add(Concepto(diccionario_id=dic.id, codigo=cod, descripcion=desc, categoria=cat, naturaleza=nat,
+                            calculado=calc, afecta_afp_onp=bool(afp), afecta_5ta_regular=bool(r5),
+                            afecta_5ta_directa=bool(d5), afecta_essalud=bool(ess), codigo_plame=plame))
+    db.commit()

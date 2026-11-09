@@ -2,7 +2,7 @@
 import logging
 import os
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from .db import SessionLocal, engine
 from .models import Base
@@ -19,6 +19,11 @@ def preparar_base():
             "La base de Neon tiene tablas de la versión anterior. En Neon > SQL Editor ejecute una sola vez: "
             "DROP SCHEMA public CASCADE; CREATE SCHEMA public;  y reinicie el servicio.")
     Base.metadata.create_all(bind=engine)
+    if engine.dialect.name == "postgresql":      # bases creadas antes de la etapa de liquidaciones
+        with engine.begin() as c:
+            c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_contrato VARCHAR(12) NOT NULL DEFAULT 'INDEFINIDO'"))
+            c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS fecha_fin_contrato DATE"))
+            c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS clase_despido VARCHAR(12)"))
     db = SessionLocal()
     try:
         sembrar_rg728(db)

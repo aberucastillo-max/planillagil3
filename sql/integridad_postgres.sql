@@ -28,3 +28,28 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS lock_periodo ON periodos;
 CREATE TRIGGER lock_periodo BEFORE UPDATE OR DELETE ON periodos FOR EACH ROW EXECUTE FUNCTION trg_periodo_propio();
+
+
+-- Liquidaciones por cese: una liquidación CERRADA es inmutable salvo la reapertura con motivo (desde la API).
+CREATE OR REPLACE FUNCTION trg_liquidacion_propia() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.estado = 'CERRADA' AND COALESCE(current_setting('app.reapertura', true), '') <> 'on' THEN
+    RAISE EXCEPTION 'La liquidación está CERRADA. Reábrala con motivo.' USING ERRCODE = '42501';
+  END IF;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END $$;
+DROP TRIGGER IF EXISTS lock_liquidacion ON liquidaciones;
+CREATE TRIGGER lock_liquidacion BEFORE UPDATE OR DELETE ON liquidaciones FOR EACH ROW EXECUTE FUNCTION trg_liquidacion_propia();
+
+CREATE OR REPLACE FUNCTION trg_liquidacion_detalle() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE v_id INT; v_estado TEXT;
+BEGIN
+  v_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.liquidacion_id ELSE NEW.liquidacion_id END;
+  SELECT estado INTO v_estado FROM liquidaciones WHERE id = v_id;
+  IF v_estado = 'CERRADA' THEN
+    RAISE EXCEPTION 'La liquidación está CERRADA. La información es inmutable.' USING ERRCODE = '42501';
+  END IF;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END $$;
+DROP TRIGGER IF EXISTS lock_liquidacion_detalle ON liquidacion_detalle;
+CREATE TRIGGER lock_liquidacion_detalle BEFORE INSERT OR UPDATE OR DELETE ON liquidacion_detalle FOR EACH ROW EXECUTE FUNCTION trg_liquidacion_detalle();

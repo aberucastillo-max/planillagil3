@@ -2,7 +2,7 @@
 Todo el dinero usa Decimal y se redondea a 2 decimales (mitad hacia arriba)."""
 import calendar
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -133,3 +133,131 @@ def retencion_5ta_regular(*, mes, base_ordinaria_mes, extra_mes, gratificacion_p
     imp = impuesto_anual_5ta(neta, uit, escala)
     por_retener = imp - D(retenido_empresa) - D(retenido_otros)
     return q2(max(por_retener / D(divisor_5ta(mes)), CERO))
+
+
+# =================================================================== LIQUIDACIÓN POR CESE (etapa 2)
+# Todas puras y con Decimal. Fórmulas de la propuesta aprobada; los porcentajes y divisores vienen del Diccionario.
+def tiempo_servicio(ingreso: date, cese: date) -> Tuple[int, int, int]:
+    """Años, meses y días de servicio hasta el cese, incluido el día del cese."""
+    fin = cese + timedelta(days=1)
+    y, m, d = fin.year - ingreso.year, fin.month - ingreso.month, fin.day - ingreso.day
+    if d < 0:
+        m -= 1
+        d += (fin.replace(day=1) - timedelta(days=1)).day     # días del mes anterior
+    if m < 0:
+        y -= 1
+        m += 12
+    return y, m, d
+
+
+def meses_calendario_completos(desde: date, hasta: date) -> int:
+    """Cuenta los meses calendario que quedan ENTEROS dentro de [desde, hasta] (los días sueltos no cuentan)."""
+    n, y, m = 0, desde.year, desde.month
+    while date(y, m, 1) <= hasta:
+        if date(y, m, 1) >= desde and fin_de_mes(y, m) <= hasta:
+            n += 1
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return n
+
+
+def semestre_gratificacion(fecha: date) -> Tuple[date, date]:
+    return (date(fecha.year, 1, 1), date(fecha.year, 6, 30)) if fecha.month <= 6 \
+        else (date(fecha.year, 7, 1), date(fecha.year, 12, 31))
+
+
+def semestre_cts(fecha: date) -> Tuple[date, date]:
+    """Semestres de la CTS: mayo a octubre y noviembre a abril."""
+    if 5 <= fecha.month <= 10:
+        return date(fecha.year, 5, 1), date(fecha.year, 10, 31)
+    ini = date(fecha.year if fecha.month >= 11 else fecha.year - 1, 11, 1)
+    return ini, date(ini.year + 1, 4, 30)
+
+
+def semestre_cts_anterior(fecha: date) -> Tuple[date, date]:
+    ini, _ = semestre_cts(fecha)
+    return semestre_cts(ini - timedelta(days=1))
+
+
+def gratificacion_trunca(rc, meses: int, divisor) -> Decimal:
+    return q2(D(rc) / D(divisor) * meses)
+
+
+def bonificacion_extraordinaria(gratificacion, pct) -> Decimal:
+    return q2(D(gratificacion) * D(pct))
+
+
+def cts_monto(rc, meses: int, dias: int, div_mes, div_dia) -> Tuple[Decimal, Decimal]:
+    """Devuelve (importe por meses, importe por días)."""
+    return q2(D(rc) / D(div_mes) * meses), q2(D(rc) / D(div_dia) * dias)
+
+
+def dias_vacaciones_ganados(anios: int, meses: int, dias: int, dias_anio) -> Decimal:
+    """30 días por año, 2.5 por mes y 30/360 por día."""
+    da = D(dias_anio)
+    return da * anios + da / 12 * meses + da / 360 * dias
+
+
+def vacaciones_pendientes(ganados: Decimal, usados: Decimal, anios: int, dias_anio) -> Tuple[Decimal, Decimal]:
+    """(vencidas, truncas) en días. Vencidas = días de años completos sin usar; truncas = el resto."""
+    pendientes = max(D(ganados) - D(usados), CERO)
+    vencidas = min(max(D(dias_anio) * anios - D(usados), CERO), pendientes)
+    return vencidas, pendientes - vencidas
+
+
+def pago_vacaciones(rc, dias, dias_anio) -> Decimal:
+    return q2(D(rc) / D(dias_anio) * D(dias))
+
+
+def indemnizacion_indefinido(remuneracion, anios: int, meses: int, dias: int, factor, tope) -> Tuple[Decimal, List[Decimal]]:
+    """1.5 remuneraciones por año; fracciones por dozavos y treintavos; tope de 12. Devuelve (total, [años, meses, días])."""
+    r, f = D(remuneracion), D(factor)
+    partes = [q2(f * r * anios), q2(f * r * meses / 12), q2(f * r * dias / 360)]
+    return min(sum(partes, CERO), q2(D(tope) * r)), partes
+
+
+def indemnizacion_plazo_fijo(remuneracion, meses_restantes: int, dias_restantes: int, factor, tope) -> Tuple[Decimal, List[Decimal]]:
+    """1.5 remuneraciones por cada mes que falta hasta el vencimiento (fracción de mes por días / 30); tope de 12."""
+    r, f = D(remuneracion), D(factor)
+    partes = [q2(f * r * meses_restantes), q2(f * r * dias_restantes / 30)]
+    return min(sum(partes, CERO), q2(D(tope) * r)), partes
+
+
+def promedio_variable_regular(montos_por_mes: Sequence, regularidad: int, ventana: int) -> Decimal:
+    """Variable regular (aparece en `regularidad` meses o más de la ventana): suma / ventana; si no, 0."""
+    montos = [D(m) for m in montos_por_mes]
+    if sum(1 for m in montos if m > 0) < int(regularidad):
+        return CERO
+    return q2(sum(montos, CERO) / D(ventana))
+
+
+def ajuste_5ta_cese(*, base_acumulada, base_liquidacion, retenido_empresa, retenido_otros, uit, deduccion_uit,
+                    deduccion_adicional_uit, escala):
+    """Ajuste final SIN proyectar: impuesto anual sobre lo realmente percibido (incluida la boleta del mes en curso
+    y la liquidación) menos lo ya retenido. Positivo = retener; negativo = devolver el exceso."""
+    bruta = D(base_acumulada) + D(base_liquidacion)
+    neta = max(bruta - (D(deduccion_uit) + D(deduccion_adicional_uit)) * D(uit), CERO)
+    impuesto = impuesto_anual_5ta(neta, uit, escala)
+    return bruta, neta, impuesto, q2(impuesto - D(retenido_empresa) - D(retenido_otros))
+
+
+def rmv_minima_essalud(rmv, dias_subsidio, base_dias: int = 30) -> Decimal:
+    """Base mínima de EsSalud: la RMV; con días de subsidio se prorratea por los días NO subsidiados."""
+    pagados = max(D(base_dias) - D(dias_subsidio), CERO)
+    return q2(D(rmv) * pagados / D(base_dias))
+
+
+def essalud_diferencial(base_boleta, base_liquidacion, rmv_min, tasa, tasa_credito_eps, tiene_eps: bool):
+    """Aporte consolidado (boleta + liquidación, mínimo aplicado una sola vez) menos lo ya calculado en la boleta."""
+    total = calcular_essalud(D(base_boleta) + D(base_liquidacion), rmv_min, tasa, tasa_credito_eps, tiene_eps)
+    antes = calcular_essalud(base_boleta, rmv_min, tasa, tasa_credito_eps, tiene_eps)
+    return total[0] - antes[0], total[1] - antes[1]
+
+
+def prima_diferencial(base_boleta, base_liquidacion, prima, tope) -> Decimal:
+    """Prima del seguro sobre la base consolidada con el tope (RMA) aplicado una sola vez, menos la ya cobrada."""
+    def prima_de(b):
+        b = D(b)
+        return q2((min(b, D(tope)) if tope else b) * D(prima))
+    return max(prima_de(D(base_boleta) + D(base_liquidacion)) - prima_de(base_boleta), CERO)

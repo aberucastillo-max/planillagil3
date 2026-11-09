@@ -15,6 +15,12 @@ CLAVES_OBLIGATORIAS = [
 ]
 
 
+CLAVES_LIQUIDACION = [
+    "BONIF_EXTRA_PCT", "BONIF_EXTRA_EPS_PCT", "GRATI_DIVISOR", "CTS_DIVISOR_MES", "CTS_DIVISOR_DIA",
+    "VAC_DIAS_ANIO", "INDEM_FACTOR", "INDEM_TOPE", "REGULARIDAD_MESES", "PROMEDIO_MESES", "RMA_PRIMA",
+]
+
+
 class ErrorDeNegocio(Exception):
     def __init__(self, mensaje: str, codigo: int = 422):
         super().__init__(mensaje)
@@ -37,12 +43,12 @@ class ParametrosPeriodo:
         return self.p[clave]
 
 
-def cargar_parametros(db: Session, diccionario_id: int, fecha: date) -> ParametrosPeriodo:
+def cargar_parametros(db: Session, diccionario_id: int, fecha: date, extra=()) -> ParametrosPeriodo:
     vig: Dict[str, DiccionarioParametro] = {}
     for r in db.query(DiccionarioParametro).filter(DiccionarioParametro.diccionario_id == diccionario_id):
         if _vigente(r, fecha) and (r.clave not in vig or r.vigente_desde > vig[r.clave].vigente_desde):
             vig[r.clave] = r
-    faltan = [k for k in CLAVES_OBLIGATORIAS if k not in vig]
+    faltan = [k for k in list(CLAVES_OBLIGATORIAS) + list(extra) if k not in vig]
     if faltan:
         raise ErrorDeNegocio(
             f"El Diccionario no tiene parámetros vigentes al {fecha}: {', '.join(faltan)}. "
