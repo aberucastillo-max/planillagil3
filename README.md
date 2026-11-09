@@ -83,6 +83,13 @@ Al arrancar, la API agrega sola las columnas y los parámetros nuevos (idempoten
   como «NO SE SUMA». El detalle de la renta de 5ta (boletas + rentas previas + conceptos afectos de la liquidación) está en `snapshot.quinta.detalle`,
   en la pantalla, en el PDF con detalle y en la hoja «Detalle 5ta categoría» del Excel.
 
+- **Cerrar y reabrir una liquidación en Postgres:** los triggers de integridad impiden tocar los renglones de una liquidación CERRADA. Por eso al cerrar
+  se crea sin cerrar, se insertan los renglones y el último paso la marca CERRADA; al reabrir, primero deja de estar cerrada y luego se borra. Los errores
+  inesperados o los rechazos de la base llegan al navegador como JSON con su mensaje (y con CORS), no como «Failed to fetch».
+- **Prima del seguro AFP con tope:** boleta + liquidación no superan `tope de remuneración asegurable del periodo × tasa de la prima`; la liquidación
+  resta lo realmente cobrado en la boleta y avisa si la boleta se calculó con otro tope.
+- Las pruebas también se verificaron contra un PostgreSQL real con los triggers de producción.
+
 ## Administrador del software (pruebas)
 Con el código de instalación (`ADMIN_TOKEN`; si no existe, `SETUP_TOKEN`) se entra como **administrador**: en el engranaje del HTML
 elija «Administrador». Ve todas las cuentas y todos los RUC, crea cuentas (devuelve su clave una sola vez) y empresas en la cuenta que
