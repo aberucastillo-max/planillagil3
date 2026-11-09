@@ -90,6 +90,10 @@ Al arrancar, la API agrega sola las columnas y los parámetros nuevos (idempoten
   resta lo realmente cobrado en la boleta y avisa si la boleta se calculó con otro tope.
 - Las pruebas también se verificaron contra un PostgreSQL real con los triggers de producción.
 
+- **Diagnóstico de conexión:** `GET /api/v1/health` devuelve la versión de la API (`VERSION_API`) y el tipo de base. Cuando una petición no recibe respuesta,
+  la pantalla consulta `/health` y dice si la API está dormida, desactualizada (versión menor a la esperada) o activa con un error interno (ver Logs).
+  En el engranaje hay un enlace «Probar la conexión con la API».
+
 ## Administrador del software (pruebas)
 Con el código de instalación (`ADMIN_TOKEN`; si no existe, `SETUP_TOKEN`) se entra como **administrador**: en el engranaje del HTML
 elija «Administrador». Ve todas las cuentas y todos los RUC, crea cuentas (devuelve su clave una sola vez) y empresas en la cuenta que
