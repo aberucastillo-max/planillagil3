@@ -35,6 +35,25 @@ async def _ciclo_de_vida(_):
 app = FastAPI(title="Planilla Ágil API", version="2.0.0", lifespan=_ciclo_de_vida,
               description="Motor de nómina peruana (Régimen General) guiado por Diccionario versionado.")
 
+async def _captura_errores(request, call_next):
+    """Un error inesperado o un rechazo de la base (triggers) debe llegar al navegador como JSON con su mensaje y con las
+    cabeceras CORS; si no, el navegador solo muestra «Failed to fetch». Va registrado ANTES del CORS para quedar por dentro."""
+    import logging
+    from sqlalchemy.exc import DBAPIError
+    try:
+        return await call_next(request)
+    except DBAPIError as e:
+        logging.getLogger("planilla").exception("Rechazo de la base de datos en %s", request.url.path)
+        detalle = str(getattr(e, "orig", e)).strip().splitlines()[0][:300]
+        return JSONResponse(status_code=409, content={"detail": f"La base de datos rechazó la operación: {detalle}"})
+    except Exception as e:                                # noqa: BLE001
+        logging.getLogger("planilla").exception("Error interno en %s", request.url.path)
+        return JSONResponse(status_code=500, content={"detail": f"Error interno del servidor ({type(e).__name__}). Revise los registros del servicio."})
+
+
+from starlette.middleware.base import BaseHTTPMiddleware      # noqa: E402
+app.add_middleware(BaseHTTPMiddleware, dispatch=_captura_errores)
+
 # Solo orígenes explícitos; autenticación por cabecera (no cookies) => sin credenciales cruzadas.
 app.add_middleware(CORSMiddleware, allow_origins=allowed_origins(), allow_credentials=False,
                    allow_methods=["*"], allow_headers=["*"],
@@ -120,9 +139,13 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
+VERSION_API = "2026-11-10-e4"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+
+
 @app.get(f"{API}/health")
 def health():
-    return {"status": "ok"}
+    from .db import engine
+    return {"status": "ok", "version": VERSION_API, "base": engine.dialect.name}
 
 
 # ------------------------------------------------------------------ empresas
@@ -439,7 +462,10 @@ def crear_periodo(data: PeriodoIn, empresa: Empresa = Depends(empresa_actual), d
     db.add(p)
     db.commit()
     arrastrados = parametros_periodo.copiar_del_anterior(db, p)       # «viaja la información de un mes al otro»
-    return {"id": p.id, "estado": p.estado, "parametros_arrastrados": arrastrados}
+    otras = [x.fase for x in db.query(Periodo).filter(Periodo.empresa_id == empresa.id, Periodo.anio == p.anio, Periodo.mes == p.mes, Periodo.id != p.id)]
+    aviso = (f"Ese mes ya tiene la fase {', '.join(otras)}. Cada fase calcula el mes completo: para 5ta, promedios y liquidación solo cuenta "
+             f"«Fin de Mes» (no se duplican boletas).") if otras else None
+    return {"id": p.id, "estado": p.estado, "parametros_arrastrados": arrastrados, "aviso": aviso}
 
 
 @app.get(API + "/empresas/{empresa_id}/periodos/{periodo_id}/parametros")

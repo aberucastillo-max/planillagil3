@@ -43,6 +43,47 @@ def _marca_agua(doc):
     return f
 
 
+def filas_5ta(d5: dict):
+    """Detalle de la renta de 5ta categoría como filas [concepto, importe, retención, estilo]: de dónde sale la renta bruta."""
+    f = []
+    mm = lambda m, a: f"{int(m):02d}/{a}"
+    f.append(["A. BOLETAS DE LA EMPRESA EN EL AÑO (enero hasta el mes del cese)", "Base afecta", "Retenido", "t"])
+    for b in d5["boletas"]:
+        f.append([f"   {mm(b['mes'], b['anio'])} · {b['fase']}", monto(b["base"]), monto(b["retencion"]), ""])
+    if not d5["boletas"]:
+        f.append(["   (no hay boletas calculadas en el año)", "", "", ""])
+    for b in d5.get("boletas_no_sumadas", []):
+        f.append([f"   {mm(b['mes'], b['anio'])} · {b['fase']} — NO SE SUMA (otra fase del mismo mes; ya cuenta «Fin de Mes»)", monto(b["base"]), monto(b["retencion"]), ""])
+    f.append(["   Subtotal A", monto(d5["subtotales"]["boletas"]), monto(d5["retenido_empresa"]), "s"])
+    f.append(["B. RENTAS DE EMPLEADORES ANTERIORES (Legajo)", "Ingreso afecto", "Retenido", "t"])
+    for r in d5["rentas_previas"]:
+        f.append([f"   desde {mm(r['mes'], r['anio'])} · RUC {r['ruc']} · {r['razon_social']}", monto(r["ingreso"]), monto(r["retencion"]), ""])
+    if not d5["rentas_previas"]:
+        f.append(["   (ninguna registrada)", "0.00", "0.00", ""])
+    f.append(["   Subtotal B", monto(d5["subtotales"]["rentas_previas"]), monto(d5["retenido_otros"]), "s"])
+    f.append(["C. ESTA LIQUIDACIÓN (solo conceptos afectos a 5ta categoría)", "Monto", "", "t"])
+    for c in d5["liquidacion"]:
+        f.append([f"   {c['descripcion']}", monto(c["monto"]), "", ""])
+    if not d5["liquidacion"]:
+        f.append(["   (ningún concepto afecto)", "0.00", "", ""])
+    f.append(["   Subtotal C", monto(d5["subtotales"]["liquidacion"]), "", "s"])
+    f.append(["RENTA BRUTA ANUAL  (A + B + C)", monto(d5["renta_bruta"]), "", "t"])
+    n_uit = _d(d5["deduccion_uit"]) + _d(d5["deduccion_adicional_uit"])
+    f.append([f"(−) Deducción de {n_uit:.0f} UIT × S/ {monto(d5['uit'])}", monto(d5["deduccion"]), "", ""])
+    f.append(["RENTA NETA", monto(d5["renta_neta"]), "", "t"])
+    f.append(["IMPUESTO POR TRAMOS (escala acumulativa)", "Renta en el tramo", "Impuesto", "t"])
+    for t in d5["tramos"]:
+        if _d(t["monto_en_tramo"]) > 0:
+            hasta = f"hasta {_d(t['hasta_uit']):.0f} UIT" if t["hasta_uit"] is not None else "más de " + f"{_d(t['desde_uit']):.0f} UIT"
+            f.append([f"   {hasta} (S/ {monto(t['desde'])} a {monto(t['hasta']) if t['hasta'] else 'en adelante'}) al {_d(t['tasa']):.0f} %", monto(t["monto_en_tramo"]), monto(t["impuesto"]), ""])
+    f.append(["IMPUESTO ANUAL", "", monto(d5["impuesto_anual"]), "t"])
+    f.append(["(−) Retenido por la empresa (boletas)", "", monto(d5["retenido_empresa"]), ""])
+    f.append(["(−) Retenido por empleadores anteriores", "", monto(d5["retenido_otros"]), ""])
+    aj = _d(d5["ajuste"])
+    f.append(["AJUSTE = " + ("RETENCIÓN ADICIONAL en esta liquidación" if aj >= 0 else "DEVOLUCIÓN del exceso retenido (otro ingreso)"), "", monto(abs(aj)), "t"])
+    return f
+
+
 def generar_pdf(empresa, doc: dict, con_formulas: bool = False, con_firmas: bool = True) -> bytes:
     snap = doc["snapshot"]
     st = getSampleStyleSheet()
@@ -218,6 +259,27 @@ def generar_pdf(empresa, doc: dict, con_formulas: bool = False, con_firmas: bool
         t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), GRIS_CLARO), ("FONTSIZE", (0, 0), (-1, 0), 8), ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                                ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDDDDD"))]))
         el.append(t)
+        d5 = (snap.get("quinta") or {}).get("detalle")
+        if d5:
+            filas = filas_5ta(d5)
+            el += [Spacer(1, 10), Paragraph(f"<b>DETALLE DE LA RENTA DE 5TA CATEGORÍA</b> — de dónde sale la renta bruta de S/ {monto(d5['renta_bruta'])}", n8b), Spacer(1, 3)]
+            t5 = Table([[Paragraph(r[0].replace(' ', '&nbsp;', 3) if r[3] == '' else f"<b>{r[0]}</b>", pq), r[1], r[2]] for r in filas], colWidths=[W * 0.62, W * 0.19, W * 0.19])
+            t5.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 7.2), ("ALIGN", (1, 0), (-1, -1), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                    ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                                    *[("BACKGROUND", (0, i), (-1, i), GRIS_CLARO) for i, r in enumerate(filas) if r[3] == "t"],
+                                    *[("FONTNAME", (0, i), (-1, i), "Helvetica-Bold") for i, r in enumerate(filas) if r[3] in ("t", "s")]]))
+            el.append(t5)
+        pri = (snap.get("pension") or {}).get("prima")
+        if pri:
+            filas = [["Base AFP de la boleta del mes", monto(pri["base_boleta"])], ["(+) Base AFP de esta liquidación", monto(pri["base_liquidacion"])],
+                     ["Base total", monto(pri["base_total"])], ["Tope de remuneración asegurable del periodo", monto(pri["tope_rma"])],
+                     ["Base con tope (la menor)", monto(pri["base_con_tope"])], [f"× tasa de la prima {_d(pri['tasa_pct']):.2f} %  =  PRIMA MÁXIMA DEL MES", monto(pri["maxima_mes"])],
+                     ["(−) Ya cobrado en la boleta", monto(pri["cobrado_boleta"])], ["PRIMA ADICIONAL EN ESTA LIQUIDACIÓN", monto(pri["adicional"])]]
+            el += [Spacer(1, 10), Paragraph("<b>SEGURO DE INVALIDEZ (PRIMA AFP) CON TOPE</b> — boleta + liquidación no superan el máximo", n8b), Spacer(1, 3)]
+            tp = Table(filas, colWidths=[W * 0.75, W * 0.25])
+            tp.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 7.5), ("ALIGN", (1, 0), (1, -1), "RIGHT"), ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                                    ("FONTNAME", (0, 5), (-1, 5), "Helvetica-Bold"), ("FONTNAME", (0, 7), (-1, 7), "Helvetica-Bold"), ("BACKGROUND", (0, 7), (-1, 7), GRIS_CLARO)]))
+            el.append(tp)
     marca = _marca_agua(doc)
     pdf.build(el, onFirstPage=marca, onLaterPages=marca)
     return buf.getvalue()
@@ -281,6 +343,22 @@ def generar_excel(empresa, doc: dict) -> bytes:
         for c in fila:
             if isinstance(c.value, float):
                 c.number_format = "#,##0.00"; c.alignment = Alignment(horizontal="right")
+    d5 = (snap.get("quinta") or {}).get("detalle")
+    if d5:
+        w5 = wb.create_sheet("Detalle 5ta categoría")
+        w5.append([f"DETALLE DE LA RENTA DE 5TA CATEGORÍA — renta bruta anual S/ {monto(d5['renta_bruta'])}"]); w5["A1"].font = Font(bold=True, size=12)
+        w5.append([snap["colaborador"]])
+        w5.append([])
+        for r in filas_5ta(d5):
+            w5.append([r[0], r[1], r[2]])
+            if r[3] in ("t", "s"):
+                for c in w5[w5.max_row]:
+                    c.font = negrita
+                    if r[3] == "t":
+                        c.fill = gris
+        w5.column_dimensions["A"].width = 78
+        w5.column_dimensions["B"].width = 20
+        w5.column_dimensions["C"].width = 20
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()

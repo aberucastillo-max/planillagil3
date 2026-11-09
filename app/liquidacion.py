@@ -11,11 +11,11 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 from typing import Dict, List, Optional
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from . import reglas as R
-from .calculo import D, sueldo_a_fecha
+from .calculo import D, ids_vigentes, periodo_vigente, periodos_vigentes, sueldo_a_fecha
 from .diccionario import CLAVES_LIQUIDACION, ErrorDeNegocio, cargar_parametros
 from .models import (Auditoria, CtsDeposito, Detalle, Empleado, Liquidacion, LiquidacionDetalle, Periodo,
                      RentaPrevia5ta, Resultado, Vacacion)
@@ -84,7 +84,8 @@ def _ultima_gratificacion(db: Session, emp: Empleado, empresa_id: int, hasta: da
     """Monto de la última gratificación (@GRATIFICACION) percibida hasta el mes indicado."""
     tope = hasta.year * 12 + hasta.month
     q = (db.query(Detalle, Periodo).join(Periodo, Periodo.id == Detalle.periodo_id)
-         .filter(Detalle.empleado_id == emp.id, Periodo.empresa_id == empresa_id, Detalle.concepto_codigo == "@GRATIFICACION").all())
+         .filter(Detalle.empleado_id == emp.id, Periodo.empresa_id == empresa_id, Detalle.concepto_codigo == "@GRATIFICACION",
+                 Periodo.id.in_(ids_vigentes(db, empresa_id))).all())
     por_mes: Dict[int, Decimal] = defaultdict(lambda: CERO)
     for d, p in q:
         i = p.anio * 12 + p.mes
@@ -99,7 +100,8 @@ def _promedio_variables(db: Session, emp: Empleado, empresa_id: int, idx: int, p
     ventana, regularidad = int(pr["PROMEDIO_MESES"]), int(pr["REGULARIDAD_MESES"])
     por_concepto: Dict[str, Dict[int, Decimal]] = defaultdict(lambda: defaultdict(lambda: CERO))
     q = (db.query(Detalle, Periodo).join(Periodo, Periodo.id == Detalle.periodo_id)
-         .filter(Detalle.empleado_id == emp.id, Periodo.empresa_id == empresa_id, Detalle.categoria == "INGRESO"))
+         .filter(Detalle.empleado_id == emp.id, Periodo.empresa_id == empresa_id, Detalle.categoria == "INGRESO",
+                 Periodo.id.in_(ids_vigentes(db, empresa_id))))
     for d, p in q:
         c = pr.conceptos.get(d.concepto_codigo)
         i = p.anio * 12 + p.mes
@@ -111,20 +113,23 @@ def _promedio_variables(db: Session, emp: Empleado, empresa_id: int, idx: int, p
     return total
 
 
-def _acumulados_5ta(db: Session, emp: Empleado, periodo: Periodo):
-    base = ret = CERO
+def _detalle_5ta(db: Session, emp: Empleado, periodo: Periodo):
+    """Lo acumulado en el año hasta el mes del cese: UNA boleta por mes (el periodo vigente del mes) y cada renta previa por
+    separado. Los periodos de otras fases del mismo mes se listan aparte y NO se suman (duplicarían la boleta)."""
+    vigentes = ids_vigentes(db, periodo.empresa_id)
+    boletas, descartadas = [], []
     q = (db.query(Resultado, Periodo).join(Periodo, Periodo.id == Resultado.periodo_id)
          .filter(Resultado.empleado_id == emp.id, Periodo.empresa_id == periodo.empresa_id,
-                 Periodo.anio == periodo.anio, Periodo.mes <= periodo.mes))
-    for r, _ in q:
-        base += D(r.base_5ta_regular)
-        ret += D(r.ret_5ta_regular)
-    ing = rets = CERO
-    for rp in db.query(RentaPrevia5ta).filter(RentaPrevia5ta.empleado_id == emp.id, RentaPrevia5ta.anio == periodo.anio,
-                                              RentaPrevia5ta.mes <= periodo.mes):
-        ing += D(rp.ingreso_afecto)
-        rets += D(rp.retencion)
-    return base + ing, ret, rets
+                 Periodo.anio == periodo.anio, Periodo.mes <= periodo.mes).order_by(Periodo.mes, Periodo.id))
+    for r, p in q:
+        fila = {"mes": p.mes, "anio": p.anio, "fase": p.fase, "base": D(r.base_5ta_regular), "retencion": D(r.ret_5ta_regular)}
+        (boletas if p.id in vigentes else descartadas).append(fila)
+    previas = []
+    for rp in (db.query(RentaPrevia5ta).filter(RentaPrevia5ta.empleado_id == emp.id, RentaPrevia5ta.anio == periodo.anio,
+                                               RentaPrevia5ta.mes <= periodo.mes).order_by(RentaPrevia5ta.mes, RentaPrevia5ta.id)):
+        previas.append({"mes": rp.mes, "anio": rp.anio, "ruc": rp.ruc, "razon_social": rp.razon_social,
+                        "ingreso": D(rp.ingreso_afecto), "retencion": D(rp.retencion)})
+    return boletas, previas, descartadas
 
 
 def _dias_vacaciones_usados(db: Session, emp: Empleado) -> Decimal:
@@ -166,9 +171,11 @@ MODOS_VAC = ("FORMULA", "CERO", "DIAS", "MONTO")
 def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: Optional[bool] = None,
              vac_modo: str = "FORMULA", vac_valor: Optional[Decimal] = None, excluir=None) -> CalculoLiq:
     """Calcula la liquidación del colaborador con los datos de HOY. No escribe en la base.
+    Se apoya siempre en el periodo vigente del mes del cese («Fin de Mes»), aunque se pida desde otra fase.
     Opciones (en tiempo real, no se guardan salvo las de vacaciones y la CTS al cerrar):
       vac_modo   FORMULA (saldo del módulo Vacaciones) | CERO (no pagar pendientes) | DIAS (días escritos) | MONTO (monto escrito en S/)
       excluir    claves de conceptos deshabilitados para SIMULAR (no se puede cerrar así)."""
+    periodo = periodo_vigente(db, periodo)
     excluir = set(excluir or [])
     vac_modo = (vac_modo or "FORMULA").upper()
     if vac_modo not in MODOS_VAC:
@@ -326,13 +333,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     afecta = lambda f, flag: f["habilitado"] and f["categoria"] == "INGRESO" and getattr(pr.conceptos[f["codigo"]], flag)
     base_afp = sum((f["monto"] for f in filas if afecta(f, "afecta_afp_onp")), CERO)
     base_ess = sum((f["monto"] for f in filas if afecta(f, "afecta_essalud")), CERO)
-    
-    # CORRECCIÓN DE DUPLICIDAD DE 5TA CATEGORÍA EN EL MES DE CESE:
-    # La base afectta de 5ta de la liquidación solo debe considerar los conceptos truncos y extraordinarios 
-    # (CTS, Grati, Vacaciones, Indemnización), aislando la remuneración ordinaria mensual del mes de cese 
-    # que ya está declarada y retenida dentro del Resultado regular de la boleta mensual (`res.remuneracion_computable`).
-    base_5ta_bruta = sum((f["monto"] for f in filas if afecta(f, "afecta_5ta_regular")), CERO)
-    base_5ta = max(CERO, base_5ta_bruta - D(res.remuneracion_computable))
+    base_5ta = sum((f["monto"] for f in filas if afecta(f, "afecta_5ta_regular")), CERO)
 
     # ---- aportes de pensión sobre lo afecto, con el tope de la prima aplicado una sola vez sobre la base del mes
     pension = {"tipo": emp.sistema_pensionario, "base": _f(base_afp)}
@@ -351,19 +352,76 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
         if afp is not None:
             add("@FONDO_PENSIONES", base_afp * afp.aporte, f"{base_afp} × {afp.aporte}")
             add("@COMISION_VARIABLE", base_afp * com, f"{base_afp} × {com}" + (" (comisión mixta: componente mensual)" if emp.tipo_comision == "MIXTA" else ""))
-            prima = R.prima_diferencial(res.base_previsional, base_afp, afp.prima, pr["RMA_PRIMA"])
-            add("@SEGURO_INVALIDEZ", prima, f"prima sobre base del mes {D(res.base_previsional) + base_afp} con tope "
-                                            f"{pr['RMA_PRIMA']:.2f} menos la ya cobrada en la boleta")
+            cobrada = D(db.query(func.coalesce(func.sum(Detalle.monto), 0)).filter(
+                Detalle.periodo_id == periodo.id, Detalle.empleado_id == emp.id, Detalle.concepto_codigo == "@SEGURO_INVALIDEZ").scalar())
+            base_b, tope = D(res.base_previsional), pr["RMA_PRIMA"]
+            maxima = R.q2(min(base_b + base_afp, tope) * afp.prima)              # prima máxima del mes: boleta + liquidación juntas
+            propia = R.q2(base_afp * afp.prima)                                  # nunca más que la prima de la propia liquidación
+            adicional = max(min(maxima - cobrada, propia), CERO)
+            esperada_boleta = R.q2(min(base_b, tope) * afp.prima)
+            if cobrada != esperada_boleta:
+                avisos.append(f"La prima cobrada en la boleta (S/ {cobrada}) no coincide con la que da el tope actual del periodo (S/ {esperada_boleta}): "
+                              "recalcule la planilla del mes del cese («Recalcular Todo») para que boleta y liquidación usen el mismo tope.")
+            if cobrada > maxima:
+                avisos.append(f"La boleta ya cobró S/ {cobrada} de prima, más que el máximo del mes (S/ {maxima}): la liquidación no cobra prima adicional.")
+            prima_info = {"base_boleta": _f(base_b), "base_liquidacion": _f(base_afp), "base_total": _f(base_b + base_afp),
+                          "tope_rma": _f(tope), "base_con_tope": _f(min(base_b + base_afp, tope)), "tasa_pct": _f(afp.prima * 100),
+                          "maxima_mes": _f(maxima), "cobrado_boleta": _f(cobrada), "propia_liquidacion": _f(propia), "adicional": _f(adicional)}
+            pension["prima"] = prima_info
+            add("@SEGURO_INVALIDEZ", adicional,
+                f"Prima máxima del mes: min({base_b} + {base_afp}, tope {tope:.2f}) × {afp.prima * 100:.2f} % = {maxima}; "
+                f"ya cobrado en la boleta {cobrada}; adicional {adicional}")
         else:
             add("@SNP_ONP", base_afp * pr["ONP_TASA"], f"{base_afp} × {pr['ONP_TASA']}")
 
     # ---- quinta categoría: ajuste final sin proyectar, con la boleta del mes en curso incluida
-    acumulado, ret_emp, ret_otros = _acumulados_5ta(db, emp, periodo)
+    boletas, previas, descartadas = _detalle_5ta(db, emp, periodo)
+    acumulado = sum((x["base"] for x in boletas), CERO) + sum((x["ingreso"] for x in previas), CERO)
+    ret_emp = sum((x["retencion"] for x in boletas), CERO)
+    ret_otros = sum((x["retencion"] for x in previas), CERO)
     bruta, neta, impuesto, ajuste = R.ajuste_5ta_cese(
         base_acumulada=acumulado, base_liquidacion=base_5ta, retenido_empresa=ret_emp, retenido_otros=ret_otros,
         uit=pr["UIT"], deduccion_uit=pr["DEDUCCION_5TA_UIT"], deduccion_adicional_uit=pr["DEDUCCION_ADICIONAL_5TA_UIT"],
         escala=pr.escala)
-    formula5 = f"Impuesto anual {impuesto} sobre renta {bruta} − retenido {ret_emp + ret_otros}"
+    ded_veces, ded_ad = pr["DEDUCCION_5TA_UIT"], pr["DEDUCCION_ADICIONAL_5TA_UIT"]
+    deduccion = (ded_veces + ded_ad) * pr["UIT"]
+    tramos = []
+    for desde, hasta, tasa in sorted(pr.escala, key=lambda t: t[0]):
+        d_ = desde * pr["UIT"]
+        h_ = hasta * pr["UIT"] if hasta is not None else None
+        en_tramo = max((neta if h_ is None else min(neta, h_)) - d_, CERO)
+        tramos.append({"desde_uit": _f(desde), "hasta_uit": None if hasta is None else _f(hasta), "desde": _f(d_.quantize(Decimal("0.01"))),
+                       "hasta": None if h_ is None else _f(h_.quantize(Decimal("0.01"))), "tasa": _f(tasa * 100),
+                       "monto_en_tramo": _f(en_tramo.quantize(Decimal("0.01"))), "impuesto": _f(R.q2(en_tramo * tasa))})
+    afectos = [{"codigo": f["codigo"], "descripcion": pr.conceptos[f["codigo"]].descripcion, "monto": _f(f["monto"])}
+               for f in filas if afecta(f, "afecta_5ta_regular")]
+    detalle_5ta = {
+        "boletas": [{"mes": x["mes"], "anio": x["anio"], "fase": x["fase"], "base": _f(x["base"]), "retencion": _f(x["retencion"])} for x in boletas],
+        "rentas_previas": [{"mes": x["mes"], "anio": x["anio"], "ruc": x["ruc"], "razon_social": x["razon_social"],
+                            "ingreso": _f(x["ingreso"]), "retencion": _f(x["retencion"])} for x in previas],
+        "boletas_no_sumadas": [{"mes": x["mes"], "anio": x["anio"], "fase": x["fase"], "base": _f(x["base"]), "retencion": _f(x["retencion"]),
+                                "motivo": "Otra fase del mismo mes: el motor calcula el mes completo en cada fase, sumarla duplicaría la boleta."}
+                               for x in descartadas],
+        "liquidacion": afectos,
+        "subtotales": {"boletas": _f(sum((x["base"] for x in boletas), CERO)), "rentas_previas": _f(sum((x["ingreso"] for x in previas), CERO)),
+                       "liquidacion": _f(base_5ta)},
+        "renta_bruta": _f(bruta), "uit": _f(pr["UIT"]), "deduccion_uit": _f(ded_veces), "deduccion_adicional_uit": _f(ded_ad),
+        "deduccion": _f(deduccion), "renta_neta": _f(neta), "tramos": tramos, "impuesto_anual": _f(impuesto),
+        "retenido_empresa": _f(ret_emp), "retenido_otros": _f(ret_otros), "ajuste": _f(ajuste)}
+    # control de integridad de la renta: meses sin boleta calculada o repetidos
+    meses_con = {x["mes"] for x in boletas}
+    primer = 1 if ing.year < periodo.anio else ing.month
+    faltan = [m for m in range(primer, periodo.mes + 1) if m not in meses_con]
+    repetidos = []
+    if faltan:
+        avisos.append("Renta de 5ta: no hay boleta calculada de los meses " + ", ".join(f"{m:02d}" for m in faltan) + f"/{periodo.anio}. Si el colaborador trabajó esos meses "
+                      "en la empresa, la renta bruta está incompleta: calcule esos periodos o regístrelos como renta previa.")
+    if descartadas:
+        avisos.append("Renta de 5ta: " + ", ".join(sorted({f"{x['mes']:02d}/{x['anio']} {x['fase']}" for x in descartadas})) +
+                      " no se suma: es otra fase de un mes que ya se cuenta con su periodo «Fin de Mes» (se evita duplicar la boleta).")
+    m2 = lambda x: f"{Decimal(x):,.2f}"
+    formula5 = (f"Impuesto anual {m2(impuesto)} sobre renta neta {m2(neta)} (renta bruta {m2(bruta)} − {ded_veces + ded_ad:.0f} UIT {m2(deduccion)}) "
+                f"− retenido {m2(ret_emp + ret_otros)}. Ver detalle de la 5ta.")
     if ajuste > 0:
         add("@IMP_RENTA_5TA", ajuste, formula5)
     elif ajuste < 0:
@@ -408,7 +466,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
             (pr["ESSALUD_TASA"] - pr["CREDITO_EPS_TASA"] if emp.cobertura_eps else pr["ESSALUD_TASA"]) * 100),
             "tasa_eps_pct": _f(pr["CREDITO_EPS_TASA"] * 100)},
         "quinta": {"renta_bruta": _f(bruta), "renta_neta": _f(neta), "impuesto_anual": _f(impuesto),
-                   "retenido": _f(ret_emp + ret_otros), "ajuste": _f(ajuste)},
+                   "retenido": _f(ret_emp + ret_otros), "ajuste": _f(ajuste), "detalle": detalle_5ta},
         "diccionario_parametros": {k: _f(v) for k, v in pr.p.items()},
     }
     return out
@@ -428,6 +486,7 @@ def faltantes_para_cerrar(emp: Empleado, cts_aplica: bool, cts_pagada: Optional[
 # ------------------------------------------------------------------ cierre definitivo (lo único que se guarda)
 def cerrar(db: Session, periodo: Periodo, emp: Empleado, cuenta_id: int, cts_anterior_pagada: Optional[bool],
            vac_modo: str = "FORMULA", vac_valor: Optional[Decimal] = None) -> Liquidacion:
+    periodo = periodo_vigente(db, periodo)
     if periodo.estado == "CERRADO":
         raise ErrorDeNegocio("El periodo del cese está CERRADO: reábralo con motivo antes de cerrar la liquidación "
                              "(la alternativa de pasarla al periodo siguiente está pendiente de la decisión del contador).", 409)
@@ -440,18 +499,22 @@ def cerrar(db: Session, periodo: Periodo, emp: Empleado, cuenta_id: int, cts_ant
         raise ErrorDeNegocio("No se puede cerrar: " + " ".join(calc.faltantes), 409)
     if calc.total_ingresos - calc.total_descuentos != calc.neto:
         raise ErrorDeNegocio("Los totales no cuadran.", 500)
+    # Orden obligatorio por los triggers de Postgres: una liquidación CERRADA no admite renglones nuevos. Se crea sin cerrar,
+    # se insertan los renglones y el ÚLTIMO paso la marca CERRADA (todo en una sola transacción).
     liq = Liquidacion(
-        periodo_id=periodo.id, empleado_id=emp.id, estado="CERRADA", fecha_cese=emp.fecha_cese, motivo_cese=emp.motivo_cese,
+        periodo_id=periodo.id, empleado_id=emp.id, estado="ABIERTA", fecha_cese=emp.fecha_cese, motivo_cese=emp.motivo_cese,
         clase_despido=emp.clase_despido, tipo_contrato=emp.tipo_contrato, fecha_fin_contrato=emp.fecha_fin_contrato,
         cts_anterior_pagada=calc.cts_anterior_pagada, total_ingresos=calc.total_ingresos, total_descuentos=calc.total_descuentos,
         neto_a_pagar=calc.neto, base_previsional=calc.base_previsional, base_essalud=calc.base_essalud, base_5ta=calc.base_5ta,
         ret_5ta_ajuste=calc.ret_5ta_ajuste, aporte_essalud=calc.aporte_essalud, aporte_eps=calc.aporte_eps,
-        avisos=calc.avisos, snapshot=calc.snapshot, calculado_en=datetime.now(timezone.utc), cerrado_en=datetime.now(timezone.utc))
+        avisos=calc.avisos, snapshot=calc.snapshot, calculado_en=datetime.now(timezone.utc))
     db.add(liq)
     db.flush()
     for i, f in enumerate([x for x in calc.filas if x["habilitado"]]):
         db.add(LiquidacionDetalle(liquidacion_id=liq.id, orden=i, concepto_codigo=f["codigo"], categoria=f["categoria"],
                                   monto=f["monto"], formula=f["formula"]))
+    db.flush()
+    liq.estado, liq.cerrado_en = "CERRADA", datetime.now(timezone.utc)
     db.add(Auditoria(cuenta_id=cuenta_id, empresa_id=periodo.empresa_id, accion="CERRAR_LIQUIDACION",
                      detalle=f"empleado {emp.id} periodo {periodo.mes:02d}/{periodo.anio} neto {calc.neto}"))
     db.commit()
@@ -466,7 +529,9 @@ def reabrir(db: Session, liq: Liquidacion, periodo: Periodo, cuenta_id: int, mot
         db.execute(text("SELECT set_config('app.reapertura', 'on', true)"))
     db.add(Auditoria(cuenta_id=cuenta_id, empresa_id=periodo.empresa_id, accion="REABRIR_LIQUIDACION",
                      detalle=f"empleado {liq.empleado_id} (neto cerrado {liq.neto_a_pagar}): {motivo}"))
-    db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id).delete()
+    liq.estado = "ABIERTA"                 # los triggers solo permiten borrar renglones de una liquidación que ya no está cerrada
+    db.flush()
+    db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id).delete(synchronize_session=False)
     db.delete(liq)
     db.commit()
 

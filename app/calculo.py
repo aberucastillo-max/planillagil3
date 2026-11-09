@@ -54,12 +54,36 @@ def _historial_essalud(db, emp, periodo, pr) -> List[dict]:
     return [por_mes[i] for i in sorted(por_mes)]
 
 
+FASE_PRINCIPAL = "Fin de Mes"
+
+
+def periodos_vigentes(db: Session, empresa_id: int) -> dict:
+    """UN solo periodo por mes para las acumulaciones (5ta, promedios, última gratificación).
+    Cada fase (Fin de Mes, Quincena) calcula el mes completo; sumar ambas duplicaría la boleta del mes.
+    Regla: manda «Fin de Mes»; si el mes no la tiene, el periodo más reciente."""
+    por_mes: dict = {}
+    for p in db.query(Periodo).filter(Periodo.empresa_id == empresa_id).order_by(Periodo.id):
+        k = (p.anio, p.mes)
+        if k not in por_mes or (p.fase == FASE_PRINCIPAL) >= (por_mes[k].fase == FASE_PRINCIPAL):
+            por_mes[k] = p
+    return por_mes
+
+
+def ids_vigentes(db: Session, empresa_id: int) -> set:
+    return {p.id for p in periodos_vigentes(db, empresa_id).values()}
+
+
+def periodo_vigente(db: Session, periodo: Periodo) -> Periodo:
+    return periodos_vigentes(db, periodo.empresa_id).get((periodo.anio, periodo.mes), periodo)
+
+
 def _previos_5ta(db, emp, periodo):
     base, ret = (db.query(func.coalesce(func.sum(Resultado.base_5ta_regular), 0),
                           func.coalesce(func.sum(Resultado.ret_5ta_regular), 0))
                  .join(Periodo, Periodo.id == Resultado.periodo_id)
                  .filter(Resultado.empleado_id == emp.id, Periodo.empresa_id == periodo.empresa_id,
-                         Periodo.anio == periodo.anio, Periodo.mes < periodo.mes).one())
+                         Periodo.anio == periodo.anio, Periodo.mes < periodo.mes,
+                         Periodo.id.in_(ids_vigentes(db, periodo.empresa_id))).one())
     otros_i, otros_r = (db.query(func.coalesce(func.sum(RentaPrevia5ta.ingreso_afecto), 0),
                                  func.coalesce(func.sum(RentaPrevia5ta.retencion), 0))
                         .filter(RentaPrevia5ta.empleado_id == emp.id, RentaPrevia5ta.anio == periodo.anio,
@@ -112,6 +136,8 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
     q_res.delete(synchronize_session=False)
 
     alertas: List[str] = []
+    if periodo_vigente(db, periodo).id != periodo.id:
+        alertas.append("Este periodo es otra fase del mes: no cuenta para la 5ta acumulada, los promedios ni la liquidación (manda «Fin de Mes»).")
     for emp in empleados:
         if emp.id in bloqueados:
             continue
