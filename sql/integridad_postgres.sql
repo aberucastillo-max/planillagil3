@@ -46,7 +46,7 @@ DECLARE v_id INT; v_estado TEXT;
 BEGIN
   v_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.liquidacion_id ELSE NEW.liquidacion_id END;
   SELECT estado INTO v_estado FROM liquidaciones WHERE id = v_id;
-  IF v_estado = 'CERRADA' THEN
+  IF v_estado = 'CERRADA' AND COALESCE(current_setting('app.reapertura', true), '') <> 'on' THEN
     RAISE EXCEPTION 'La liquidación está CERRADA. La información es inmutable.' USING ERRCODE = '42501';
   END IF;
   RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
