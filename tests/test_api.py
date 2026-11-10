@@ -177,3 +177,9 @@ def test_pagina_de_alta_inicial_sin_consola(entorno, monkeypatch):
         clave = r.text.split("pa_", 1)[1].split("<", 1)[0]
         creada = c.post("/api/v1/empresas", headers=H("pa_" + clave), json={"ruc": "20999999999", "razon_social": "Cliente Auto SAC"})
         assert creada.status_code == 201, creada.text
+
+
+def test_health_informa_la_version_para_diagnosticar_despliegues(entorno):
+    cli, _ = entorno
+    h = cli.get("/api/v1/health").json()
+    assert h["status"] == "ok" and h["version"] == "2026-11-11-f3" and h["base"] in ("sqlite", "postgresql")
