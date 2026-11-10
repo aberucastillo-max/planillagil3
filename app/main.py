@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from . import calculo, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
+from . import calculo, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
 from .config import allowed_origins
 from .db import get_db
 from .diccionario import ErrorDeNegocio
@@ -139,7 +139,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-11-f3"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-11-f5"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -919,6 +919,23 @@ def pdf_de_liquidacion(periodo_id: int, empleado_id: int, formulas: bool = False
     contenido = pdf_liquidacion.generar_pdf(empresa, doc, formulas, firmas)
     nombre = f"LIQUIDACION_{empresa.ruc}_{doc['documento']}_{doc['periodo']['anio']}-{doc['periodo']['mes']:02d}" + ("" if doc["estado"] == "CERRADA" else "_BORRADOR")
     return Response(contenido, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={nombre}.pdf"})
+
+
+@app.get(API + "/empresas/{empresa_id}/liquidaciones/certificado-5ta")
+def certificado_5ta(periodo_id: int, empleado_id: int, opc: dict = Depends(_opciones_liq),
+                    empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Datos del certificado de rentas y retenciones de 5ta del cesado (cerrada o en cálculo: sin cerrar es un borrador)."""
+    doc = _documento(db, empresa, periodo_id, empleado_id, opc)
+    return certificado.datos(db, empresa, _empleado(db, empresa, empleado_id), doc)
+
+
+@app.get(API + "/empresas/{empresa_id}/liquidaciones/certificado-5ta/pdf")
+def certificado_5ta_pdf(periodo_id: int, empleado_id: int, opc: dict = Depends(_opciones_liq),
+                        empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    doc = _documento(db, empresa, periodo_id, empleado_id, opc)
+    c = certificado.datos(db, empresa, _empleado(db, empresa, empleado_id), doc)
+    nombre = f"CERTIFICADO_5TA_{empresa.ruc}_{doc['documento']}_{c['ejercicio']}" + ("" if c["definitivo"] else "_BORRADOR")
+    return Response(certificado.generar_pdf(c), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={nombre}.pdf"})
 
 
 @app.get(API + "/empresas/{empresa_id}/liquidaciones/excel")
