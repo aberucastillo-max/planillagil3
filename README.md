@@ -94,6 +94,17 @@ Al arrancar, la API agrega sola las columnas y los parámetros nuevos (idempoten
   la pantalla consulta `/health` y dice si la API está dormida, desactualizada (versión menor a la esperada) o activa con un error interno (ver Logs).
   En el engranaje hay un enlace «Probar la conexión con la API».
 
+- **Datos adicionales de la liquidación** (`GET/POST/PUT/DELETE .../liquidaciones/manuales`): ingresos y descuentos manuales (suma graciosa, descuentos
+  otros, comisiones pendientes, quincena...) ligados a conceptos del Diccionario que el motor no calcula (`@SUMA_GRACIOSA` y `@DESCUENTOS_OTROS` son nuevos).
+  Participan en el cálculo global (totales, bases de AFP, EsSalud y 5ta según sus afectaciones, neto, PDF y Excel). No se pueden tocar con la
+  liquidación CERRADA; se descartan si el cese se anula.
+
+- **Quincena = adelanto, configurable por empresa** (`usa_quincena`, `quincena_modo` PORCENTAJE o MONTO, `quincena_valor`; se fija al registrar la empresa y
+  se edita en «Datos de la empresa»). El proceso de quincena (periodo con fase «Quincena») solo genera el adelanto de cada colaborador (`@ADELANTO_QUINCENA`):
+  no calcula AFP/ONP, EsSalud ni 5ta, no entra en ninguna acumulación y no genera AFPnet, PLAME ni boletas. La planilla de fin de mes lo descuenta como
+  `@QUINCENA` (una novedad manual de `@QUINCENA` tiene prioridad). En pantalla hay dos botones: «Procesar Quincena» y «Procesar Planilla».
+- La **suma graciosa** (`@SUMA_GRACIOSA`) afecta a 5ta (no a AFP/ONP ni EsSalud).
+
 ## Administrador del software (pruebas)
 Con el código de instalación (`ADMIN_TOKEN`; si no existe, `SETUP_TOKEN`) se entra como **administrador**: en el engranaje del HTML
 elija «Administrador». Ve todas las cuentas y todos los RUC, crea cuentas (devuelve su clave una sola vez) y empresas en la cuenta que
@@ -104,3 +115,19 @@ Es un acceso total: úselo solo en pruebas o con un `ADMIN_TOKEN` propio y secre
 Gratificación, CTS, utilidades y liquidación · asiento contable y boletas PDF · reingreso (ciclos laborales) ·
 saldo vacacional · login con usuarios (hoy API key por cuenta) · migraciones con Alembic ·
 validar contra la norma vigente: UIT/RMV, tasas AFP, códigos PLAME (Tablas 17, 21 y 22) y columnas de AFPnet.
+
+## Post Planilla y configuración con periodo de aplicación (versiones f2 y f3)
+
+Cada registro de configuración **rige desde un mes** y vale hasta que se registre otro posterior para la misma clave. No se puede
+registrar ni eliminar un periodo de aplicación que ya alcanzó a un periodo CERRADO. Precedencia al calcular: Diccionario, luego lo
+configurado por la empresa y, por último, las ediciones propias del periodo en «Soporte de Fórmula».
+
+| Ruta (bajo `/api/v1/empresas/{empresa_id}`) | Para qué sirve |
+| --- | --- |
+| `GET/POST /config/plame`, `DELETE /config/plame/{id}` | Código PLAME por concepto |
+| `GET/POST /config/cuentas`, `DELETE /config/cuentas/{id}` | Plan de cuentas contables por concepto (debe y haber), incluido `@NETO_A_PAGAR` |
+| `GET /planillas/{periodo_id}/asiento` | Asiento del periodo de fin de mes (planilla más liquidaciones cerradas); provisional si el periodo está abierto |
+| `GET/POST /config/vigencias/{familia}`, `DELETE /config/vigencias/{familia}/{id}` | Familias: `PARAMETRO`, `TASA_AFP`, `AFECTACION`, `SUSPENSION`, `CENTRO_COSTO`, `PUESTO`, `AREA` |
+| `GET /config/catalogos/verificar?periodo_id=` | Colaboradores con centro de costo, puesto o área sin asignar, inexistente o no vigente en el periodo |
+
+El HTML (`planilla_agil_frontend_v3.html`) exige la versión `2026-11-11-f3` o posterior de la API.
