@@ -346,6 +346,7 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
             ret_5ta_regular=reg, ret_5ta_directa=directa, dias_trabajados=dias_trab, dias_subsidio=subs,
             horas_extras=h25 + h35,
             snapshot={"colaborador": nombre, "documento": emp.documento_identidad, "puesto": emp.puesto,
+                      "fecha_cese": emp.fecha_cese.isoformat() if emp.fecha_cese else None,      # para saber si la boleta se calculó antes de registrar el cese
                       "sede": emp.sede, "sistema_pensionario": emp.sistema_pensionario, "afp": emp.afp_nombre,
                       "banco": emp.banco, "cuenta": emp.numero_cuenta, "sueldo": str(sueldo),
                       "diccionario": f"{dic.codigo} v{dic.version}",

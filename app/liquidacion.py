@@ -198,6 +198,12 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     res = db.query(Resultado).filter(Resultado.periodo_id == periodo.id, Resultado.empleado_id == emp.id).first()
     if res is None:
         raise ErrorDeNegocio("Calcule primero la boleta del mes del cese («Procesar Planilla»): la liquidación se apoya en ella.", 409)
+    # la boleta del mes del cese debe haberse calculado CON el cese registrado: si no, paga el mes completo y la 5ta y las bases quedan infladas
+    snap = res.snapshot or {}
+    dvinc = R.dias_vinculo(ing, cese, periodo.fecha_inicio, periodo.fecha_fin, int(pr["BASE_DIAS"]))
+    if ("fecha_cese" in snap and snap["fecha_cese"] != cese.isoformat()) or ("fecha_cese" not in snap and (res.dias_trabajados + res.dias_subsidio) > dvinc):
+        raise ErrorDeNegocio("La boleta del mes del cese se calculó antes de registrar el cese (o con otra fecha de cese): "
+                             "use «Procesar Planilla» para recalcularla y vuelva a pulsar Ver. Así no se paga el mes completo ni se suma de más en la 5ta.", 409)
     sueldo = sueldo_a_fecha(db, emp.id, cese)
     if sueldo is None:
         raise ErrorDeNegocio("El colaborador no tiene sueldo vigente a la fecha de cese.", 422)
