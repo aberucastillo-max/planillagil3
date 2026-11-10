@@ -130,4 +130,18 @@ configurado por la empresa y, por último, las ediciones propias del periodo en 
 | `GET/POST /config/vigencias/{familia}`, `DELETE /config/vigencias/{familia}/{id}` | Familias: `PARAMETRO`, `TASA_AFP`, `AFECTACION`, `SUSPENSION`, `CENTRO_COSTO`, `PUESTO`, `AREA` |
 | `GET /config/catalogos/verificar?periodo_id=` | Colaboradores con centro de costo, puesto o área sin asignar, inexistente o no vigente en el periodo |
 
-El HTML (`planilla_agil_frontend_v3.html`) exige la versión `2026-11-11-f3` o posterior de la API.
+El HTML (`planilla_agil_frontend_v3.html`) exige la versión `2026-11-11-f5` o posterior de la API.
+
+## Certificado de rentas y retenciones de quinta categoría (versión f4)
+
+Se emite desde la liquidación del cesado (Art. 45 del Reglamento de la LIR, D.S. 122-94-EF). Sin cerrar sale como BORRADOR; al cerrar la
+liquidación sale definitivo. Los rubros (sueldo, utilidades, comisiones, gratificaciones, vacaciones, asignación familiar, reintegros, otras
+remuneraciones e ingresos de otras empresas) suman siempre la renta bruta del cálculo de 5ta.
+
+| Ruta (bajo `/api/v1/empresas/{empresa_id}`) | Para qué sirve |
+| --- | --- |
+| `GET /liquidaciones/certificado-5ta?periodo_id=&empleado_id=` | Datos del certificado, texto legal y lista de datos que faltan |
+| `GET /liquidaciones/certificado-5ta/pdf?periodo_id=&empleado_id=` | PDF con el formato del modelo |
+
+El texto del certificado usa la razón social, el RUC, el domicilio fiscal y el representante legal de la empresa, y el nombre y DNI del colaborador.
+Cerrar una liquidación congela la boleta del mes del cesado; reabrirla la desbloquea para procesarla de nuevo.
