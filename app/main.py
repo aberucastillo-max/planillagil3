@@ -13,14 +13,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from . import calculo, exportadores, liquidacion as L, parametros_periodo, pdf_boleta, pdf_liquidacion, reglas as R, semestrales
+from . import calculo, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
 from .config import allowed_origins
 from .db import get_db
 from .diccionario import ErrorDeNegocio
 from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionario, DiccionarioAFP, Empleado,
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
-from .models import Liquidacion, LiquidacionDetalle, Vinculo
-from .schemas import (EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
+from .models import Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
+from .schemas import (ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
                       RentaPreviaIn, SueldoIn, VacacionIn)
 from .security import Acceso, empresa_actual, exigir_admin, generar_api_key, get_acceso, get_cuenta, hash_key
 
@@ -139,7 +139,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-10-e4"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-11-f3"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -159,7 +159,8 @@ def listar_empresas(acceso: Acceso = Depends(get_acceso), db: Session = Depends(
     activos = lambda eid: db.query(Empleado).filter(Empleado.empresa_id == eid, Empleado.fecha_cese.is_(None)).count()
     return [{"id": e.id, "ruc": e.ruc, "razon_social": e.razon_social, "trabajadores_activos": activos(e.id),
              "direccion_fiscal": e.direccion_fiscal, "representante_legal": e.representante_legal,
-             "cargo_representante": e.cargo_representante,
+             "cargo_representante": e.cargo_representante, "usa_quincena": bool(e.usa_quincena),
+             "quincena_modo": e.quincena_modo, "quincena_valor": e.quincena_valor,
              "limite_trabajadores": cuentas[e.cuenta_id].max_trabajadores, "cuenta_id": e.cuenta_id,
              "cuenta": cuentas[e.cuenta_id].nombre if acceso.admin else None}
             for e in q.order_by(Empresa.razon_social)]
@@ -185,7 +186,8 @@ def crear_empresa(data: EmpresaIn, acceso: Acceso = Depends(get_acceso), db: Ses
         raise HTTPException(422, f"Diccionario {data.diccionario_codigo} no existe.")
     e = Empresa(cuenta_id=cuenta.id, ruc=data.ruc, razon_social=data.razon_social.upper(), diccionario_id=dic.id,
                 direccion_fiscal=data.direccion_fiscal, representante_legal=data.representante_legal,
-                cargo_representante=data.cargo_representante)
+                cargo_representante=data.cargo_representante, usa_quincena=data.usa_quincena,
+                quincena_modo=data.quincena_modo, quincena_valor=Decimal(str(data.quincena_valor)))
     db.add(e)
     if acceso.admin:
         db.add(Auditoria(cuenta_id=cuenta.id, accion="ADMIN_CREA_EMPRESA", detalle=f"RUC {data.ruc}"))
@@ -196,8 +198,15 @@ def crear_empresa(data: EmpresaIn, acceso: Acceso = Depends(get_acceso), db: Ses
 @app.patch(API + "/empresas/{empresa_id}")
 def actualizar_empresa(data: EmpresaPatch, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """Datos de la empresa que salen en boletas y liquidaciones (razón social, dirección, representante)."""
-    for campo, valor in data.model_dump(exclude_unset=True).items():
+    cambios = data.model_dump(exclude_unset=True)
+    for campo, valor in cambios.items():
+        if campo == "quincena_valor" and valor is not None:
+            valor = Decimal(str(valor))
+        if campo in ("usa_quincena", "quincena_modo", "quincena_valor") and valor is None:
+            continue
         setattr(empresa, campo, valor.upper() if campo == "razon_social" and valor else valor)
+    if empresa.quincena_modo == "PORCENTAJE" and Decimal(str(empresa.quincena_valor)) > 100:
+        raise HTTPException(422, "El porcentaje de la quincena no puede pasar de 100.")
     db.commit()
     return {"ok": True, "razon_social": empresa.razon_social}
 
@@ -297,6 +306,7 @@ def dar_de_baja(empleado_id: int, data: BajaIn, empresa: Empresa = Depends(empre
         raise HTTPException(422, "Con el motivo «02 Despido» indique la clase de despido (justificado, arbitrario o nulo).")
     e.fecha_cese, e.motivo_cese, e.estado = data.fecha_cese, data.motivo, "CESADO"
     e.clase_despido = data.clase_despido if data.motivo == L.MOTIVO_DESPIDO else None
+    manuales.limpiar(db, e, salvo_fecha=data.fecha_cese)           # datos adicionales de un cese anterior que ya no aplica
     db.commit()
     return {"estado": e.estado}
 
@@ -307,6 +317,7 @@ def reactivar_por_error(empleado_id: int, empresa: Empresa = Depends(empresa_act
     if e.estado != "CESADO":
         raise HTTPException(409, "El colaborador no está cesado.")
     L.exigir_sin_liquidacion_cerrada(db, e.id, "reactivarlo")      # solo una liquidación CERRADA bloquea; no hay borradores guardados
+    manuales.limpiar(db, e)                                        # los datos adicionales de un cese anulado no tienen razón de ser
     e.fecha_cese, e.motivo_cese, e.clase_despido, e.estado = None, None, None, "ACTIVO"
     db.commit()
     return {"estado": e.estado}
@@ -453,6 +464,8 @@ def listar_periodos(empresa: Empresa = Depends(empresa_actual), db: Session = De
 
 @app.post(API + "/empresas/{empresa_id}/periodos", status_code=201)
 def crear_periodo(data: PeriodoIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    if data.fase == "Quincena" and not empresa.usa_quincena:
+        raise HTTPException(409, "Esta empresa no tiene activada la quincena (adelanto): actívela en «Datos de la empresa».")
     if db.query(Periodo).filter(Periodo.empresa_id == empresa.id, Periodo.anio == data.anio, Periodo.mes == data.mes,
                                 Periodo.fase == data.fase).first():
         raise HTTPException(409, "Ese periodo ya existe.")
@@ -462,9 +475,8 @@ def crear_periodo(data: PeriodoIn, empresa: Empresa = Depends(empresa_actual), d
     db.add(p)
     db.commit()
     arrastrados = parametros_periodo.copiar_del_anterior(db, p)       # «viaja la información de un mes al otro»
-    otras = [x.fase for x in db.query(Periodo).filter(Periodo.empresa_id == empresa.id, Periodo.anio == p.anio, Periodo.mes == p.mes, Periodo.id != p.id)]
-    aviso = (f"Ese mes ya tiene la fase {', '.join(otras)}. Cada fase calcula el mes completo: para 5ta, promedios y liquidación solo cuenta "
-             f"«Fin de Mes» (no se duplican boletas).") if otras else None
+    aviso = ("La quincena es un ADELANTO: no calcula aportes ni 5ta. Procésela con «Procesar quincena»; la planilla de fin de mes la descuenta."
+             if p.fase == "Quincena" else None)
     return {"id": p.id, "estado": p.estado, "parametros_arrastrados": arrastrados, "aviso": aviso}
 
 
@@ -676,12 +688,74 @@ def resumen_conceptos(periodo_id: int, empresa: Empresa = Depends(empresa_actual
 
 
 
+# ----------------------------------------------------------------------------- Post Planilla: configuración y asiento
+@app.get(API + "/empresas/{empresa_id}/config/plame")
+def cfg_plame_listar(periodo_id: Optional[int] = None, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Códigos PLAME por concepto: vigentes para el periodo (o el mes actual) y su historial de periodos de aplicación."""
+    return postplanilla.listar(db, empresa, "plame", periodo_id)
+
+
+@app.post(API + "/empresas/{empresa_id}/config/plame", status_code=201)
+def cfg_plame_registrar(datos: ConfigPlameIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    return postplanilla.registrar(db, empresa, "plame", datos)
+
+
+@app.delete(API + "/empresas/{empresa_id}/config/plame/{registro_id}")
+def cfg_plame_eliminar(registro_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    return postplanilla.eliminar(db, empresa, "plame", registro_id)
+
+
+@app.get(API + "/empresas/{empresa_id}/config/cuentas")
+def cfg_cuentas_listar(periodo_id: Optional[int] = None, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Plan de cuentas contables por concepto: vigentes para el periodo (o el mes actual) y su historial."""
+    return postplanilla.listar(db, empresa, "cuentas", periodo_id)
+
+
+@app.post(API + "/empresas/{empresa_id}/config/cuentas", status_code=201)
+def cfg_cuentas_registrar(datos: ConfigCuentaIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    return postplanilla.registrar(db, empresa, "cuentas", datos)
+
+
+@app.delete(API + "/empresas/{empresa_id}/config/cuentas/{registro_id}")
+def cfg_cuentas_eliminar(registro_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    return postplanilla.eliminar(db, empresa, "cuentas", registro_id)
+
+
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/asiento")
+def asiento_contable(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Asiento del periodo según el plan de cuentas vigente: planilla + liquidaciones CERRADAS. Provisional mientras el periodo esté abierto."""
+    return postplanilla.asiento(db, empresa, _periodo(db, empresa, periodo_id))
+
+
+@app.get(API + "/empresas/{empresa_id}/config/vigencias/{familia}")
+def cfg_vigencias_listar(familia: str, periodo_id: Optional[int] = None, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Configuración con periodo de aplicación (PARAMETRO, TASA_AFP, AFECTACION, SUSPENSION, CENTRO_COSTO, PUESTO, AREA): vigente e historial."""
+    return configuracion.listar(db, empresa, familia.upper(), periodo_id)
+
+
+@app.post(API + "/empresas/{empresa_id}/config/vigencias/{familia}", status_code=201)
+def cfg_vigencias_registrar(familia: str, datos: ConfigVigenciaIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    return configuracion.registrar(db, empresa, familia.upper(), datos)
+
+
+@app.delete(API + "/empresas/{empresa_id}/config/vigencias/{familia}/{registro_id}")
+def cfg_vigencias_eliminar(familia: str, registro_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    return configuracion.eliminar(db, empresa, familia.upper(), registro_id)
+
+
+@app.get(API + "/empresas/{empresa_id}/config/catalogos/verificar")
+def cfg_catalogos_verificar(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Colaboradores con centro de costo, puesto o área que no existe o no está vigente en el periodo."""
+    _periodo(db, empresa, periodo_id)
+    return configuracion.verificar_catalogos(db, empresa, periodo_id)
+
+
 @app.get(API + "/empresas/{empresa_id}/diccionario/parametros")
 def parametros_vigentes(empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """Parámetros del Diccionario vigentes hoy (solo lectura: se cambian publicando una nueva versión)."""
     from .diccionario import cargar_parametros
     dic = db.get(Diccionario, empresa.diccionario_id)
-    pr = cargar_parametros(db, empresa.diccionario_id, date.today())
+    pr = cargar_parametros(db, empresa.diccionario_id, date.today(), empresa_id=empresa.id)
     return {"diccionario": f"{dic.codigo} v{dic.version}", "parametros": {k: str(v) for k, v in pr.p.items()},
             "afps": [{"nombre": a.nombre, "aporte": a.aporte, "comision": a.comision, "comision_mixta_flujo": a.comision_mixta_flujo,
                       "comision_saldo": a.comision_saldo, "prima": a.prima, "tope_prima": a.tope_prima}
@@ -689,10 +763,16 @@ def parametros_vigentes(empresa: Empresa = Depends(empresa_actual), db: Session 
 
 
 # ------------------------------------------------------------------ exportaciones
+def _sin_quincena(p: Periodo, que: str):
+    if p.fase == "Quincena":
+        raise HTTPException(409, f"La quincena es un adelanto: no genera {que}. Use el periodo «Fin de Mes» del mismo mes.")
+
+
 @app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-afpnet")
 def exportar_afpnet(periodo_id: int, formato: str = Query("xlsx", pattern="^(xlsx|csv)$"),
                     empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     p = _periodo(db, empresa, periodo_id)
+    _sin_quincena(p, "el archivo AFPnet")
     contenido, mime = exportadores.afpnet_bytes(exportadores.afpnet_filas(db, empresa, p), formato)
     nombre = f"AFPNET_{empresa.ruc}_{p.anio}_{p.mes:02d}.{formato}"
     return Response(contenido, media_type=mime, headers={
@@ -703,6 +783,7 @@ def exportar_afpnet(periodo_id: int, formato: str = Query("xlsx", pattern="^(xls
 @app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-plame-zip")
 def exportar_plame(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     p = _periodo(db, empresa, periodo_id)
+    _sin_quincena(p, "el PLAME")
     contenido, prefijo, sin_codigo = exportadores.plame_zip(db, empresa, p)
     return Response(contenido, media_type="application/zip", headers={
         "Content-Disposition": f"attachment; filename=PLAME_{prefijo}.zip",
@@ -717,6 +798,30 @@ def _descripciones(db: Session, periodo: Periodo) -> dict:
     return {c.codigo: c.descripcion for c in db.query(Concepto).filter(Concepto.diccionario_id == periodo.diccionario_id)}
 
 
+_SIN_AFECTA = {"afp": False, "essalud": False, "quinta": False}
+
+
+def _flags_concepto(db: Session, periodo: Periodo) -> dict:
+    """Afectaciones de cada concepto vigentes para la empresa en el mes del periodo (Diccionario más lo configurado)."""
+    from .diccionario import cargar_parametros
+    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id)
+    return {c.codigo: {"afp": bool(c.afecta_afp_onp), "essalud": bool(c.afecta_essalud), "quinta": bool(c.afecta_5ta_regular or c.afecta_5ta_directa)}
+            for c in pr.conceptos.values()}
+
+
+def _afecta_fila(flags: dict, f: dict, manuales: list) -> dict:
+    if f.get("categoria") != "INGRESO":                      # un descuento no tiene afectaciones
+        return dict(_SIN_AFECTA)
+    fm = f.get("flags")                                       # dato adicional con sus propias afectaciones (liquidación en curso)
+    if fm is not None:
+        return {"afp": bool(fm.get("afecta_afp_onp")), "essalud": bool(fm.get("afecta_essalud")), "quinta": bool(fm.get("afecta_5ta_regular"))}
+    if f.get("manual"):                                       # liquidación cerrada: se toma del respaldo guardado
+        m = next((x for x in manuales if x.get("concepto") == f.get("codigo") and (x.get("descripcion") or "") == (f.get("descripcion") or "")), None)
+        if m is not None:
+            return {"afp": bool(m.get("afecta_afp")), "essalud": bool(m.get("afecta_essalud")), "quinta": bool(m.get("afecta_5ta"))}
+    return dict(flags.get(f.get("codigo"), _SIN_AFECTA))
+
+
 def _doc_comun(periodo: Periodo, emp: Empleado) -> dict:
     return {"periodo": {"id": periodo.id, "anio": periodo.anio, "mes": periodo.mes, "estado": periodo.estado},
             "empleado_id": emp.id, "documento": emp.documento_identidad, "colaborador": f"{emp.apellidos}, {emp.nombres}",
@@ -725,6 +830,7 @@ def _doc_comun(periodo: Periodo, emp: Empleado) -> dict:
 
 def _doc_calculo(db: Session, periodo: Periodo, emp: Empleado, calc) -> dict:
     desc = _descripciones(db, periodo)
+    flags = _flags_concepto(db, periodo)
     return {**_doc_comun(periodo, emp), "estado": "SIN_CERRAR", "liquidacion_id": None, "motivo_cese": emp.motivo_cese,
             "clase_despido": emp.clase_despido, "tipo_tipo": None, "tipo_contrato": emp.tipo_contrato,
             "fecha_fin_contrato": emp.fecha_fin_contrato, "cts_anterior_aplica": calc.cts_anterior_aplica,
@@ -733,19 +839,23 @@ def _doc_calculo(db: Session, periodo: Periodo, emp: Empleado, calc) -> dict:
             "aporte_essalud": calc.aporte_essalud, "aporte_eps": calc.aporte_eps, "avisos": calc.avisos,
             "faltantes_para_cerrar": calc.faltantes, "puede_cerrar": not calc.faltantes and periodo.estado == "ABIERTO",
             "simulacion": calc.simulacion, "snapshot": calc.snapshot,
-            "conceptos": [{"codigo": f["codigo"], "clave": f["clave"], "habilitado": f["habilitado"],
-                           "descripcion": desc.get(f["codigo"], ""), "categoria": f["categoria"],
-                           "monto": f["monto"], "formula": f["formula"]} for f in calc.filas]}
+            "conceptos": [{"codigo": f["codigo"], "clave": f["clave"], "habilitado": f["habilitado"], "manual": bool(f.get("manual")),
+                           "descripcion": f.get("descripcion") or desc.get(f["codigo"], ""), "categoria": f["categoria"],
+                           "monto": f["monto"], "formula": f["formula"], "afecta": _afecta_fila(flags, f, [])} for f in calc.filas]}
 
 
-def _conceptos_cerrada(db: Session, liq: Liquidacion, desc: dict) -> list:
+def _conceptos_cerrada(db: Session, liq: Liquidacion, desc: dict, flags: dict) -> list:
     visto: dict = {}
     filas = []
+    manuales = (liq.snapshot or {}).get("manuales", []) if isinstance(liq.snapshot, dict) else []
     for d in db.query(LiquidacionDetalle).filter(LiquidacionDetalle.liquidacion_id == liq.id).order_by(LiquidacionDetalle.orden):
         visto[d.concepto_codigo] = visto.get(d.concepto_codigo, 0) + 1
         clave = d.concepto_codigo if visto[d.concepto_codigo] == 1 else f"{d.concepto_codigo}:{visto[d.concepto_codigo]}"
-        filas.append({"codigo": d.concepto_codigo, "clave": clave, "habilitado": True, "descripcion": desc.get(d.concepto_codigo, ""),
-                      "categoria": d.categoria, "monto": d.monto, "formula": d.formula})
+        fila = {"codigo": d.concepto_codigo, "clave": clave, "habilitado": True, "manual": bool(d.manual),
+                "descripcion": d.descripcion or desc.get(d.concepto_codigo, ""),
+                "categoria": d.categoria, "monto": d.monto, "formula": d.formula}
+        fila["afecta"] = _afecta_fila(flags, fila, manuales)
+        filas.append(fila)
     return filas
 
 
@@ -766,7 +876,7 @@ def _doc_cerrada(db: Session, liq: Liquidacion, emp: Empleado) -> dict:
             "total_ingresos": liq.total_ingresos, "total_descuentos": liq.total_descuentos, "neto_a_pagar": liq.neto_a_pagar,
             "ret_5ta_ajuste": liq.ret_5ta_ajuste, "aporte_essalud": liq.aporte_essalud, "aporte_eps": liq.aporte_eps,
             "avisos": liq.avisos or [], "faltantes_para_cerrar": [], "puede_cerrar": False, "simulacion": False,
-            "snapshot": liq.snapshot, "conceptos": _conceptos_cerrada(db, liq, desc)}
+            "snapshot": liq.snapshot, "conceptos": _conceptos_cerrada(db, liq, desc, _flags_concepto(db, periodo))}
 
 
 def _documento(db: Session, empresa: Empresa, periodo_id: int, empleado_id: int, opc: dict) -> dict:
@@ -822,6 +932,83 @@ def excel_de_liquidacion(periodo_id: int, empleado_id: int, opc: dict = Depends(
                     headers={"Content-Disposition": f"attachment; filename={nombre}.xlsx"})
 
 
+# ------------------------------------------------------------------ datos adicionales de la liquidación (ingresos y descuentos manuales)
+def _cesado(db: Session, empresa: Empresa, empleado_id: int) -> Empleado:
+    e = _empleado(db, empresa, empleado_id)
+    if e.fecha_cese is None:
+        raise HTTPException(422, "El colaborador no tiene fecha de cese: dé primero de baja al colaborador.")
+    return e
+
+
+def _manual_o_404(db: Session, e: Empleado, manual_id: int) -> LiquidacionManual:
+    m = db.query(LiquidacionManual).filter(LiquidacionManual.id == manual_id, LiquidacionManual.empleado_id == e.id,
+                                           LiquidacionManual.fecha_cese == e.fecha_cese).first()
+    if not m:
+        raise HTTPException(404, "Dato adicional no encontrado.")
+    return m
+
+
+def _aplicar_manual(m: LiquidacionManual, data, concepto: dict):
+    m.concepto_codigo = concepto["codigo"]
+    m.descripcion = (data.descripcion or concepto["descripcion"]).strip()
+    m.monto = Decimal(str(data.monto))
+    m.nota = (data.nota or "").strip() or None
+    ingreso = concepto["categoria"] == "INGRESO"                    # un descuento no tiene afectaciones
+    m.afecta_afp = bool(data.afecta_afp if data.afecta_afp is not None else concepto["afecta_afp"]) if ingreso else False
+    m.afecta_essalud = bool(data.afecta_essalud if data.afecta_essalud is not None else concepto["afecta_essalud"]) if ingreso else False
+    m.afecta_5ta = bool(data.afecta_5ta if data.afecta_5ta is not None else concepto["afecta_5ta"]) if ingreso else False
+
+
+@app.get(API + "/empresas/{empresa_id}/liquidaciones/manuales")
+def listar_manuales(empleado_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Datos adicionales del cese (ingresos y descuentos manuales) y el catálogo de conceptos que se pueden usar."""
+    return manuales.listar(db, _cesado(db, empresa, empleado_id), empresa.diccionario_id)
+
+
+@app.post(API + "/empresas/{empresa_id}/liquidaciones/manuales", status_code=201)
+def agregar_manual(data: ManualIn, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    e = _cesado(db, empresa, data.empleado_id)
+    L.exigir_sin_liquidacion_cerrada(db, e.id, "agregar datos adicionales")
+    c = manuales.concepto_valido(db, empresa.diccionario_id, data.concepto_codigo)
+    m = LiquidacionManual(empleado_id=e.id, fecha_cese=e.fecha_cese)
+    _aplicar_manual(m, data, c)
+    igual = db.query(LiquidacionManual).filter(LiquidacionManual.empleado_id == e.id, LiquidacionManual.fecha_cese == e.fecha_cese,
+                                               LiquidacionManual.concepto_codigo == m.concepto_codigo, LiquidacionManual.descripcion == m.descripcion,
+                                               LiquidacionManual.monto == m.monto, LiquidacionManual.nota == m.nota).first()
+    if igual:
+        raise HTTPException(409, "Ese dato adicional ya está registrado (mismo concepto, detalle y monto).")
+    db.add(m)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="LIQ_MANUAL_AGREGA",
+                     detalle=f"empleado {e.id} {m.concepto_codigo} {m.monto}"))
+    db.commit()
+    return manuales.listar(db, e, empresa.diccionario_id)
+
+
+@app.put(API + "/empresas/{empresa_id}/liquidaciones/manuales/{manual_id}")
+def editar_manual(manual_id: int, data: ManualEditIn, empleado_id: int, empresa: Empresa = Depends(empresa_actual),
+                  cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    e = _cesado(db, empresa, empleado_id)
+    L.exigir_sin_liquidacion_cerrada(db, e.id, "modificar datos adicionales")
+    m = _manual_o_404(db, e, manual_id)
+    _aplicar_manual(m, data, manuales.concepto_valido(db, empresa.diccionario_id, data.concepto_codigo))
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="LIQ_MANUAL_EDITA", detalle=f"empleado {e.id} dato {m.id}"))
+    db.commit()
+    return manuales.listar(db, e, empresa.diccionario_id)
+
+
+@app.delete(API + "/empresas/{empresa_id}/liquidaciones/manuales/{manual_id}")
+def borrar_manual(manual_id: int, empleado_id: int, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta),
+                  db: Session = Depends(get_db)):
+    e = _cesado(db, empresa, empleado_id)
+    L.exigir_sin_liquidacion_cerrada(db, e.id, "eliminar datos adicionales")
+    m = _manual_o_404(db, e, manual_id)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="LIQ_MANUAL_ELIMINA",
+                     detalle=f"empleado {e.id} {m.concepto_codigo} {m.monto} «{m.descripcion}»"))
+    db.delete(m)
+    db.commit()
+    return manuales.listar(db, e, empresa.diccionario_id)
+
+
 @app.post(API + "/empresas/{empresa_id}/liquidaciones/cerrar")
 def cerrar_liquidacion(data: LiquidacionCerrarIn, empresa: Empresa = Depends(empresa_actual),
                        cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
@@ -851,6 +1038,7 @@ def boletas_pdf(periodo_id: int, empleado_id: Optional[int] = None, empresa: Emp
                 db: Session = Depends(get_db)):
     """Una boleta (o todas las del periodo), dos copias por hoja. Requiere haber calculado el periodo."""
     p = _periodo(db, empresa, periodo_id)
+    _sin_quincena(p, "boletas (constancia de pago)")
     q = (db.query(Resultado, Empleado).join(Empleado, Empleado.id == Resultado.empleado_id)
          .filter(Resultado.periodo_id == p.id).order_by(Empleado.apellidos, Empleado.nombres))
     if empleado_id:
@@ -917,6 +1105,7 @@ def reingreso(empleado_id: int, data: ReingresoIn, empresa: Empresa = Depends(em
         raise HTTPException(403, f"Tu plan {cuenta.plan} permite hasta {cuenta.max_trabajadores} trabajadores por empresa.")
     cerrada = db.query(Liquidacion).filter(Liquidacion.empleado_id == e.id, Liquidacion.estado == "CERRADA",
                                            Liquidacion.fecha_cese == e.fecha_cese).first()
+    manuales.limpiar(db, e)                                        # sin liquidación cerrada, los datos adicionales del ciclo anterior se descartan
     db.add(Vinculo(empleado_id=e.id, fecha_ingreso=e.fecha_ingreso, fecha_cese=e.fecha_cese,
                    motivo_cese=e.motivo_cese, clase_despido=e.clase_despido))
     e.fecha_ingreso, e.fecha_cese, e.motivo_cese, e.clase_despido, e.estado = data.fecha_ingreso, None, None, None, "ACTIVO"

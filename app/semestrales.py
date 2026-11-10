@@ -79,7 +79,7 @@ def calcular_cts(db: Session, empresa: Empresa, anio: int, codigo: str) -> dict:
     """Calcula (o recalcula) la CTS del semestre de los colaboradores vigentes al último día del semestre.
     Los ya DEPOSITADOS no se tocan. Los cesados antes del corte se liquidan con su liquidación por cese."""
     ini, fin = semestre_cts(anio, codigo)
-    pr = cargar_parametros(db, empresa.diccionario_id, fin, extra=CLAVES_LIQUIDACION)
+    pr = cargar_parametros(db, empresa.diccionario_id, fin, empresa_id=empresa.id, extra=CLAVES_LIQUIDACION)
     avisos: List[str] = []
     q = db.query(Empleado).filter(Empleado.empresa_id == empresa.id, Empleado.fecha_ingreso <= fin)
     for emp in q.order_by(Empleado.apellidos, Empleado.nombres):

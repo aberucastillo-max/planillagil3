@@ -16,7 +16,7 @@ def _tiene_ediciones(db: Session, periodo_id: int) -> bool:
 
 
 def efectivos(db: Session, empresa: Empresa, periodo: Periodo) -> dict:
-    pr = cargar_parametros(db, empresa.diccionario_id, periodo.fecha_inicio, periodo_id=periodo.id)
+    pr = cargar_parametros(db, empresa.diccionario_id, periodo.fecha_inicio, empresa_id=empresa.id, periodo_id=periodo.id)
     return {
         "periodo": {"id": periodo.id, "anio": periodo.anio, "mes": periodo.mes, "estado": periodo.estado},
         "origen": "PERIODO" if _tiene_ediciones(db, periodo.id) else "DICCIONARIO",

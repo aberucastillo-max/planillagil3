@@ -15,9 +15,9 @@ from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from . import reglas as R
-from .calculo import D, ids_vigentes, periodo_vigente, periodos_vigentes, sueldo_a_fecha
+from .calculo import D, FASE_QUINCENA, ids_vigentes, periodo_vigente, periodos_vigentes, sueldo_a_fecha
 from .diccionario import CLAVES_LIQUIDACION, ErrorDeNegocio, cargar_parametros
-from .models import (Auditoria, CtsDeposito, Detalle, Empleado, Liquidacion, LiquidacionDetalle, Periodo,
+from .models import (Auditoria, CtsDeposito, Detalle, Empleado, Liquidacion, LiquidacionDetalle, LiquidacionManual, Periodo,
                      RentaPrevia5ta, Resultado, Vacacion)
 
 CERO = Decimal("0")
@@ -120,10 +120,9 @@ def _detalle_5ta(db: Session, emp: Empleado, periodo: Periodo):
     boletas, descartadas = [], []
     q = (db.query(Resultado, Periodo).join(Periodo, Periodo.id == Resultado.periodo_id)
          .filter(Resultado.empleado_id == emp.id, Periodo.empresa_id == periodo.empresa_id,
-                 Periodo.anio == periodo.anio, Periodo.mes <= periodo.mes).order_by(Periodo.mes, Periodo.id))
+                 Periodo.anio == periodo.anio, Periodo.mes <= periodo.mes, Periodo.id.in_(vigentes)).order_by(Periodo.mes, Periodo.id))
     for r, p in q:
-        fila = {"mes": p.mes, "anio": p.anio, "fase": p.fase, "base": D(r.base_5ta_regular), "retencion": D(r.ret_5ta_regular)}
-        (boletas if p.id in vigentes else descartadas).append(fila)
+        boletas.append({"mes": p.mes, "anio": p.anio, "fase": p.fase, "base": D(r.base_5ta_regular), "retencion": D(r.ret_5ta_regular)})
     previas = []
     for rp in (db.query(RentaPrevia5ta).filter(RentaPrevia5ta.empleado_id == emp.id, RentaPrevia5ta.anio == periodo.anio,
                                                RentaPrevia5ta.mes <= periodo.mes).order_by(RentaPrevia5ta.mes, RentaPrevia5ta.id)):
@@ -176,6 +175,8 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
       vac_modo   FORMULA (saldo del módulo Vacaciones) | CERO (no pagar pendientes) | DIAS (días escritos) | MONTO (monto escrito en S/)
       excluir    claves de conceptos deshabilitados para SIMULAR (no se puede cerrar así)."""
     periodo = periodo_vigente(db, periodo)
+    if periodo.fase == FASE_QUINCENA:
+        raise ErrorDeNegocio("La liquidación se apoya en la planilla de fin de mes del mes del cese: procésela primero (la quincena es solo un adelanto).", 409)
     excluir = set(excluir or [])
     vac_modo = (vac_modo or "FORMULA").upper()
     if vac_modo not in MODOS_VAC:
@@ -189,14 +190,14 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
         raise ErrorDeNegocio("El colaborador no tiene fecha de cese: dé primero de baja al colaborador.", 422)
     if not (periodo.fecha_inicio <= emp.fecha_cese <= periodo.fecha_fin):
         raise ErrorDeNegocio("El cese no cae dentro del periodo elegido.", 422)
-    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, extra=CLAVES_LIQUIDACION, periodo_id=periodo.id)
+    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id, extra=CLAVES_LIQUIDACION, periodo_id=periodo.id)
     cese, ing = emp.fecha_cese, emp.fecha_ingreso
     out = CalculoLiq()
     avisos = out.avisos
 
     res = db.query(Resultado).filter(Resultado.periodo_id == periodo.id, Resultado.empleado_id == emp.id).first()
     if res is None:
-        raise ErrorDeNegocio("Calcule primero la boleta del mes del cese (Recalcular Todo): la liquidación se apoya en ella.", 409)
+        raise ErrorDeNegocio("Calcule primero la boleta del mes del cese («Procesar Planilla»): la liquidación se apoya en ella.", 409)
     sueldo = sueldo_a_fecha(db, emp.id, cese)
     if sueldo is None:
         raise ErrorDeNegocio("El colaborador no tiene sueldo vigente a la fecha de cese.", 422)
@@ -207,14 +208,14 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
 
     contador: Dict[str, int] = defaultdict(int)
 
-    def add(codigo, monto, formula, cat=None):
+    def add(codigo, monto, formula, cat=None, extra=None):
         c = pr.conceptos[codigo]
         m = R.q2(monto)
         if m != 0:                                   # no se guardan renglones en cero (p. ej. comisión mixta mensual 0 %)
             contador[codigo] += 1
             clave = codigo if contador[codigo] == 1 else f"{codigo}:{contador[codigo]}"
             filas.append({"codigo": codigo, "clave": clave, "categoria": cat or c.categoria, "monto": m, "formula": formula,
-                          "habilitado": clave not in excluir})
+                          "habilitado": clave not in excluir, **(extra or {})})
 
     # ---- gratificación trunca y su bonificación
     g_ini, _ = R.semestre_gratificacion(cese)
@@ -330,7 +331,26 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
                            f"tope {pr['INDEM_TOPE']:.0f} remuneraciones")
             add("@INDEMNIZACION_DESPIDO", total, formula)
 
-    afecta = lambda f, flag: f["habilitado"] and f["categoria"] == "INGRESO" and getattr(pr.conceptos[f["codigo"]], flag)
+    # ---- datos adicionales (ingresos y descuentos manuales del usuario, ligados a conceptos del Diccionario)
+    manuales_snap = []
+    for mm in (db.query(LiquidacionManual).filter(LiquidacionManual.empleado_id == emp.id, LiquidacionManual.fecha_cese == emp.fecha_cese)
+               .order_by(LiquidacionManual.id)):
+        cm = pr.conceptos.get(mm.concepto_codigo)
+        if cm is None or cm.categoria not in ("INGRESO", "DESCUENTO"):
+            avisos.append(f"Dato adicional «{mm.descripcion}»: el concepto {mm.concepto_codigo} ya no existe en el Diccionario; se omitió.")
+            continue
+        extra = {"manual": True, "manual_id": mm.id, "descripcion": mm.descripcion}
+        if cm.categoria == "INGRESO":
+            extra["flags"] = {"afecta_afp_onp": bool(mm.afecta_afp), "afecta_essalud": bool(mm.afecta_essalud), "afecta_5ta_regular": bool(mm.afecta_5ta)}
+        add(mm.concepto_codigo, mm.monto, "Dato adicional manual: " + mm.descripcion + (f" · {mm.nota}" if mm.nota else ""), extra=extra)
+        manuales_snap.append({"id": mm.id, "concepto": mm.concepto_codigo, "descripcion": mm.descripcion, "categoria": cm.categoria, "monto": _f(mm.monto),
+                              "nota": mm.nota, "afecta_afp": bool(mm.afecta_afp), "afecta_essalud": bool(mm.afecta_essalud), "afecta_5ta": bool(mm.afecta_5ta)})
+
+    def afecta(f, flag):                    # los datos adicionales usan SUS afectaciones; el resto, las del concepto del Diccionario
+        if not f["habilitado"] or f["categoria"] != "INGRESO":
+            return False
+        return f["flags"][flag] if "flags" in f else bool(getattr(pr.conceptos[f["codigo"]], flag))
+
     base_afp = sum((f["monto"] for f in filas if afecta(f, "afecta_afp_onp")), CERO)
     base_ess = sum((f["monto"] for f in filas if afecta(f, "afecta_essalud")), CERO)
     base_5ta = sum((f["monto"] for f in filas if afecta(f, "afecta_5ta_regular")), CERO)
@@ -361,7 +381,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
             esperada_boleta = R.q2(min(base_b, tope) * afp.prima)
             if cobrada != esperada_boleta:
                 avisos.append(f"La prima cobrada en la boleta (S/ {cobrada}) no coincide con la que da el tope actual del periodo (S/ {esperada_boleta}): "
-                              "recalcule la planilla del mes del cese («Recalcular Todo») para que boleta y liquidación usen el mismo tope.")
+                              "recalcule la planilla del mes del cese («Procesar Planilla») para que boleta y liquidación usen el mismo tope.")
             if cobrada > maxima:
                 avisos.append(f"La boleta ya cobró S/ {cobrada} de prima, más que el máximo del mes (S/ {maxima}): la liquidación no cobra prima adicional.")
             prima_info = {"base_boleta": _f(base_b), "base_liquidacion": _f(base_afp), "base_total": _f(base_b + base_afp),
@@ -459,7 +479,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
         "opciones": {"vacaciones_pendientes": {"modo": vac_modo, "valor": None if vac_valor is None else _f(vac_valor),
                                                "formula_dias": f"{venc_f:.4f}", "formula_monto": _f(pago_f)},
                      "cts_anterior_pagada": out.cts_anterior_pagada, "excluidos": sorted(excluir)},
-        "simulacion": bool(excluir),
+        "simulacion": bool(excluir), "manuales": manuales_snap,
         "regla_quinta": "Cesado: la retención regular de 5ta del mes del cese no se aplica en la boleta; se aplica completa en esta liquidación.",
         "pension": pension,
         "essalud": {"base": _f(base_ess), "con_eps": bool(emp.cobertura_eps), "tasa_essalud_pct": _f(
@@ -512,7 +532,7 @@ def cerrar(db: Session, periodo: Periodo, emp: Empleado, cuenta_id: int, cts_ant
     db.flush()
     for i, f in enumerate([x for x in calc.filas if x["habilitado"]]):
         db.add(LiquidacionDetalle(liquidacion_id=liq.id, orden=i, concepto_codigo=f["codigo"], categoria=f["categoria"],
-                                  monto=f["monto"], formula=f["formula"]))
+                                  monto=f["monto"], formula=f["formula"], descripcion=f.get("descripcion"), manual=bool(f.get("manual"))))
     db.flush()
     liq.estado, liq.cerrado_en = "CERRADA", datetime.now(timezone.utc)
     db.add(Auditoria(cuenta_id=cuenta_id, empresa_id=periodo.empresa_id, accion="CERRAR_LIQUIDACION",

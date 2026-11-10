@@ -43,6 +43,9 @@ class Empresa(Base):
     direccion_fiscal = Column(String(255))
     representante_legal = Column(String(150))
     cargo_representante = Column(String(100))
+    usa_quincena = Column(Boolean, nullable=False, default=False)               # la empresa paga quincena como ADELANTO
+    quincena_modo = Column(String(12), nullable=False, default="PORCENTAJE")    # PORCENTAJE del sueldo | MONTO fijo por colaborador
+    quincena_valor = Column(Numeric(12, 2), nullable=False, default=50)         # 50 = 50 % del sueldo (o monto en S/ si el modo es MONTO)
     diccionario_id = Column(Integer, ForeignKey("diccionarios.id"), nullable=False)
     creado_en = Column(DateTime(timezone=True), default=_now)
     __table_args__ = (UniqueConstraint("cuenta_id", "ruc", name="uq_empresa_cuenta_ruc"),)
@@ -327,6 +330,8 @@ class LiquidacionDetalle(Base):
     categoria = Column(String(12), nullable=False)
     monto = Column(Numeric(12, 2), nullable=False)
     formula = Column(Text)
+    descripcion = Column(String(150))                       # texto propio de los datos adicionales (manuales)
+    manual = Column(Boolean, nullable=False, default=False)  # True = dato adicional escrito por el usuario
 
 
 # ----------------------------------------------------------------- beneficios semestrales y reingreso (etapa 3)
@@ -348,6 +353,23 @@ class CtsDeposito(Base):
     snapshot = Column(JSON)
     calculado_en = Column(DateTime(timezone=True), default=_now)
     __table_args__ = (UniqueConstraint("empleado_id", "sem_inicio", name="uq_cts_empleado_semestre"),)
+
+
+class LiquidacionManual(Base):
+    """Ingresos y descuentos MANUALES de la liquidación (p. ej. suma graciosa, descuentos otros), ligados a un concepto del Diccionario.
+    Son datos de entrada del cese (no un borrador de la liquidación): participan en el cálculo y se cierran con ella."""
+    __tablename__ = "liquidacion_manuales"
+    id = Column(Integer, primary_key=True)
+    empleado_id = Column(Integer, ForeignKey("empleados.id"), nullable=False, index=True)
+    fecha_cese = Column(Date, nullable=False)
+    concepto_codigo = Column(String(50), nullable=False)
+    descripcion = Column(String(150), nullable=False)
+    monto = Column(Numeric(12, 2), nullable=False)
+    nota = Column(String(255))
+    afecta_afp = Column(Boolean, nullable=False, default=False)
+    afecta_essalud = Column(Boolean, nullable=False, default=False)
+    afecta_5ta = Column(Boolean, nullable=False, default=False)
+    creado_en = Column(DateTime(timezone=True), default=_now)
 
 
 class Vinculo(Base):
@@ -384,3 +406,46 @@ class PeriodoAFP(Base):
     comision_saldo = Column(Numeric(7, 4), nullable=False, default=0)
     prima = Column(Numeric(7, 4), nullable=False)
     __table_args__ = (UniqueConstraint("periodo_id", "nombre", name="uq_periodo_afp"),)
+
+
+# ------------------------------------------------ configuración de Post Planilla (con periodo de aplicación)
+class ConfigPlame(Base):
+    """Código PLAME de un concepto para la empresa, vigente desde un mes. Sin registro rige el del Diccionario."""
+    __tablename__ = "config_plame"
+    id = Column(Integer, primary_key=True)
+    empresa_id = Column(Integer, ForeignKey("empresas.id"), nullable=False, index=True)
+    concepto_codigo = Column(String(50), nullable=False)
+    codigo_plame = Column(String(6), nullable=False)
+    aplica_desde = Column(Date, nullable=False)              # primer día del mes desde el que rige
+    nota = Column(String(200))
+    creado = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint("empresa_id", "concepto_codigo", "aplica_desde", name="uq_cfg_plame"),)
+
+
+class ConfigCuenta(Base):
+    """Cuentas contables (debe / haber) de un concepto para el asiento, vigentes desde un mes."""
+    __tablename__ = "config_cuentas"
+    id = Column(Integer, primary_key=True)
+    empresa_id = Column(Integer, ForeignKey("empresas.id"), nullable=False, index=True)
+    concepto_codigo = Column(String(50), nullable=False)      # un concepto del Diccionario o @NETO_A_PAGAR
+    cuenta_debe = Column(String(12))
+    cuenta_haber = Column(String(12))
+    aplica_desde = Column(Date, nullable=False)
+    nota = Column(String(200))
+    creado = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint("empresa_id", "concepto_codigo", "aplica_desde", name="uq_cfg_cuenta"),)
+
+
+class ConfigVigencia(Base):
+    """Configuración de la empresa con periodo de aplicación: parámetros, tasas AFP, afectaciones, suspensiones y catálogos.
+    Cada registro rige desde el mes «aplica_desde» y vale hasta que se registre otro posterior para la misma clave."""
+    __tablename__ = "config_vigencias"
+    id = Column(Integer, primary_key=True)
+    empresa_id = Column(Integer, ForeignKey("empresas.id"), nullable=False, index=True)
+    familia = Column(String(20), nullable=False)      # PARAMETRO | TASA_AFP | AFECTACION | SUSPENSION | CENTRO_COSTO | PUESTO | AREA
+    clave = Column(String(50), nullable=False)
+    valor = Column(JSON, nullable=False)
+    aplica_desde = Column(Date, nullable=False)
+    nota = Column(String(200))
+    creado = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint("empresa_id", "familia", "clave", "aplica_desde", name="uq_cfg_vigencia"),)

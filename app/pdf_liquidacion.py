@@ -186,13 +186,14 @@ def generar_pdf(empresa, doc: dict, con_formulas: bool = False, con_firmas: bool
         g = snap.get("gratificacion") or {"meses": 0, "dias": 0}
         titulo("GRATIFICACIONES :")
         f.append(["   Gratificación Trunca :", f"{g['meses']} meses y {g['dias']} dias", monto(gr[0]["monto"]), monto(gr[0]["monto"])])
-    otros = _por_codigo(doc, "@BONIF_EXTRA_29351", "@DEVOLUCION_5TA", "@INDEMNIZACION_DESPIDO")
+    manual_ing = [c for c in doc["conceptos"] if c.get("manual") and c["categoria"] == "INGRESO" and c.get("habilitado", True)]
+    otros = _por_codigo(doc, "@BONIF_EXTRA_29351", "@DEVOLUCION_5TA", "@INDEMNIZACION_DESPIDO") + manual_ing
     if otros:
         titulo("OTROS INGRESOS :")
         nombres = {"@BONIF_EXTRA_29351": "BONIF. EXTRA L.29351", "@DEVOLUCION_5TA": "DEVOLUCION RETENCION 5TA CATEGORIA",
                    "@INDEMNIZACION_DESPIDO": "INDEMNIZACION POR DESPIDO ARBITRARIO"}
         for o in otros:
-            f.append([f"   {nombres[o['codigo']]}", "", monto(o["monto"]), ""])
+            f.append([f"   {o['descripcion'].upper() if o.get('manual') else nombres[o['codigo']]}", "", monto(o["monto"]), ""])
         f[-1][3] = monto(sum((_d(o["monto"]) for o in otros), Decimal(0)))
     if f:
         el.append(tabla(f, est))
@@ -224,6 +225,12 @@ def generar_pdf(empresa, doc: dict, con_formulas: bool = False, con_firmas: bool
     if r5:
         titulo("IMPUESTO A LA RENTA :")
         f.append(["   RETENCION 5TA CATEGORIA", "", monto(r5[0]["monto"]), monto(r5[0]["monto"])])
+    man_desc = [c for c in doc["conceptos"] if c.get("manual") and c["categoria"] == "DESCUENTO" and c.get("habilitado", True)]
+    if man_desc:
+        titulo("OTROS DESCUENTOS :")
+        for c in man_desc:
+            f.append([f"   {c['descripcion'].upper()}", "", monto(c["monto"]), ""])
+        f[-1][3] = monto(sum((_d(c["monto"]) for c in man_desc), Decimal(0)))
     if f:
         el.append(tabla(f, est))
     el += [barra("TOTAL DESCUENTOS", f"S/. {monto(doc['total_descuentos'])}"), Spacer(1, 3),

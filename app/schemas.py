@@ -15,6 +15,15 @@ class EmpresaIn(BaseModel):
     direccion_fiscal: Optional[str] = None
     representante_legal: Optional[str] = None
     cargo_representante: Optional[str] = None
+    usa_quincena: bool = False
+    quincena_modo: str = Field(default="PORCENTAJE", pattern="^(PORCENTAJE|MONTO)$")
+    quincena_valor: float = Field(default=50, gt=0, le=1_000_000)
+
+    @model_validator(mode="after")
+    def _quincena(self):
+        if self.quincena_modo == "PORCENTAJE" and self.quincena_valor > 100:
+            raise ValueError("El porcentaje de la quincena no puede pasar de 100.")
+        return self
 
 
 class EmpleadoIn(BaseModel):
@@ -117,7 +126,7 @@ class RentaPreviaIn(BaseModel):
 class PeriodoIn(BaseModel):
     anio: int = Field(ge=2020, le=2100)
     mes: int = Field(ge=1, le=12)
-    fase: str = "Fin de Mes"
+    fase: str = Field(default="Fin de Mes", pattern="^(Fin de Mes|Quincena)$")
 
 
 class NovedadFila(BaseModel):
@@ -191,6 +200,9 @@ class EmpresaPatch(BaseModel):
     direccion_fiscal: Optional[str] = None
     representante_legal: Optional[str] = None
     cargo_representante: Optional[str] = None
+    usa_quincena: Optional[bool] = None
+    quincena_modo: Optional[str] = Field(default=None, pattern="^(PORCENTAJE|MONTO)$")
+    quincena_valor: Optional[float] = Field(default=None, gt=0, le=1_000_000)
 
 
 class CtsCalcularIn(BaseModel):
@@ -227,3 +239,46 @@ class CuentaPatch(BaseModel):
 class ParametrosPeriodoIn(BaseModel):
     parametros: dict = Field(default_factory=dict)
     afps: List[dict] = Field(default_factory=list)
+
+
+class ManualIn(BaseModel):
+    empleado_id: int
+    concepto_codigo: str = Field(min_length=2, max_length=50)
+    descripcion: Optional[str] = Field(default=None, max_length=150)
+    monto: float = Field(gt=0, le=10_000_000)
+    nota: Optional[str] = Field(default=None, max_length=255)
+    afecta_afp: Optional[bool] = None            # None = lo que indique el concepto del Diccionario
+    afecta_essalud: Optional[bool] = None
+    afecta_5ta: Optional[bool] = None
+
+
+class ManualEditIn(BaseModel):
+    concepto_codigo: str = Field(min_length=2, max_length=50)
+    descripcion: Optional[str] = Field(default=None, max_length=150)
+    monto: float = Field(gt=0, le=10_000_000)
+    nota: Optional[str] = Field(default=None, max_length=255)
+    afecta_afp: Optional[bool] = None
+    afecta_essalud: Optional[bool] = None
+    afecta_5ta: Optional[bool] = None
+
+
+class ConfigPlameIn(BaseModel):
+    concepto_codigo: str = Field(min_length=2, max_length=50)
+    codigo_plame: str = Field(pattern=r"^\d{4}$")                    # códigos de la tabla de conceptos PLAME (4 dígitos)
+    aplica_desde: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")     # mes de aplicación, AAAA-MM
+    nota: Optional[str] = Field(default=None, max_length=200)
+
+
+class ConfigCuentaIn(BaseModel):
+    concepto_codigo: str = Field(min_length=2, max_length=50)
+    cuenta_debe: Optional[str] = Field(default=None, pattern=r"^\d{2,10}$")
+    cuenta_haber: Optional[str] = Field(default=None, pattern=r"^\d{2,10}$")
+    aplica_desde: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    nota: Optional[str] = Field(default=None, max_length=200)
+
+
+class ConfigVigenciaIn(BaseModel):
+    clave: str = Field(min_length=1, max_length=50)
+    valor: dict
+    aplica_desde: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    nota: Optional[str] = Field(default=None, max_length=200)

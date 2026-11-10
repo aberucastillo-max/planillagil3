@@ -3,12 +3,14 @@ IMPORTANTE: validar códigos y excepciones contra las especificaciones vigentes 
 import csv
 import io
 import zipfile
+from datetime import date
 
 from sqlalchemy.orm import Session
 
 from . import reglas as R
 from .diccionario import ErrorDeNegocio, cargar_parametros
 from . import liquidacion as L
+from .postplanilla import vigentes as _vigentes_cfg
 from .models import Ausentismo, Detalle, Empleado, Empresa, Periodo, Resultado, TipoSuspension
 
 AFPNET_EXC_SUBSIDIO_TOTAL = "U"      # TODO validar contra AFPnet
@@ -65,7 +67,7 @@ def afpnet_bytes(filas, formato: str):
 
 
 def plame_zip(db: Session, empresa: Empresa, periodo: Periodo):
-    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio)
+    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id)
     prefijo = f"0601{periodo.anio}{periodo.mes:02d}{empresa.ruc}"
     horas_dia = int(pr["HORAS_DIA"])
 
@@ -82,6 +84,7 @@ def plame_zip(db: Session, empresa: Empresa, periodo: Periodo):
         dias = R.dias_calendario_solapados(aus.fecha_inicio, aus.fecha_fin, periodo.fecha_inicio, periodo.fecha_fin)
         snl.append(f"01|{emp.documento_identidad.strip()}|{ts.codigo_plame}|{dias}|")
 
+    codigos_empresa = {k: v.codigo_plame for k, v in _vigentes_cfg(db, "plame", empresa.id, date(periodo.anio, periodo.mes, 1)).items()}   # configurados por la empresa, con su periodo de aplicación
     cerradas, _ = L.consolidado(db, periodo)
     docs = {e.id: e.documento_identidad.strip() for e in db.query(Empleado).filter(Empleado.empresa_id == empresa.id)}
     acum = {}          # (empleado, código PLAME) -> monto
@@ -91,11 +94,12 @@ def plame_zip(db: Session, empresa: Empresa, periodo: Periodo):
         c = pr.conceptos.get(codigo)
         if not c or categoria not in ("INGRESO", "DESCUENTO"):
             return
-        if not c.codigo_plame:
+        cod_plame = codigos_empresa.get(codigo) or c.codigo_plame
+        if not cod_plame:
             if monto != 0:
                 sin_codigo.add(codigo)
             return
-        acum[(emp_id, c.codigo_plame)] = acum.get((emp_id, c.codigo_plame), R.CERO) + R.D(monto)
+        acum[(emp_id, cod_plame)] = acum.get((emp_id, cod_plame), R.CERO) + R.D(monto)
 
     for d in db.query(Detalle).filter(Detalle.periodo_id == periodo.id).order_by(Detalle.empleado_id):
         sumar(d.empleado_id, d.concepto_codigo, d.categoria, d.monto)

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from . import reglas as R
 from .diccionario import ErrorDeNegocio, ParametrosPeriodo, cargar_parametros
-from .models import (Auditoria, Ausentismo, Beneficio, Detalle, Diccionario, Empleado, Novedad,
+from .models import (Auditoria, Ausentismo, Beneficio, Detalle, Diccionario, Empleado, Empresa, Novedad,
                      Periodo, RentaPrevia5ta, Resultado, Sueldo, Vacacion)
 
 CERO = Decimal("0")
@@ -55,18 +55,13 @@ def _historial_essalud(db, emp, periodo, pr) -> List[dict]:
 
 
 FASE_PRINCIPAL = "Fin de Mes"
+FASE_QUINCENA = "Quincena"
 
 
 def periodos_vigentes(db: Session, empresa_id: int) -> dict:
-    """UN solo periodo por mes para las acumulaciones (5ta, promedios, última gratificación).
-    Cada fase (Fin de Mes, Quincena) calcula el mes completo; sumar ambas duplicaría la boleta del mes.
-    Regla: manda «Fin de Mes»; si el mes no la tiene, el periodo más reciente."""
-    por_mes: dict = {}
-    for p in db.query(Periodo).filter(Periodo.empresa_id == empresa_id).order_by(Periodo.id):
-        k = (p.anio, p.mes)
-        if k not in por_mes or (p.fase == FASE_PRINCIPAL) >= (por_mes[k].fase == FASE_PRINCIPAL):
-            por_mes[k] = p
-    return por_mes
+    """Periodos que cuentan para las acumulaciones (5ta, promedios de variables, última gratificación, liquidación): solo «Fin de Mes».
+    La quincena es un ADELANTO (no calcula aportes, 5ta ni bases) y nunca se acumula: Fin de Mes la descuenta en su boleta."""
+    return {(p.anio, p.mes): p for p in db.query(Periodo).filter(Periodo.empresa_id == empresa_id, Periodo.fase == FASE_PRINCIPAL).order_by(Periodo.id)}
 
 
 def ids_vigentes(db: Session, empresa_id: int) -> set:
@@ -91,10 +86,63 @@ def _previos_5ta(db, emp, periodo):
     return D(base), D(ret), D(otros_i), D(otros_r)
 
 
+def recalcular_quincena(db: Session, periodo: Periodo) -> dict:
+    """PROCESO DE QUINCENA: genera el ADELANTO de cada colaborador vigente al día 15 (porcentaje del sueldo o monto fijo, según lo
+    configurado en la empresa). No calcula AFP/ONP, EsSalud ni 5ta: eso lo hace el proceso de planilla (Fin de Mes), que descuenta
+    este adelanto como @QUINCENA."""
+    exigir_abierto(periodo)
+    empresa = db.get(Empresa, periodo.empresa_id)
+    if not empresa.usa_quincena:
+        raise ErrorDeNegocio("Esta empresa no tiene activada la quincena (adelanto): actívela en «Datos de la empresa».", 409)
+    dic = db.get(Diccionario, periodo.diccionario_id)
+    dia15 = date(periodo.anio, periodo.mes, 15)
+    pct = empresa.quincena_modo == "PORCENTAJE"
+    valor = D(empresa.quincena_valor)
+    db.query(Detalle).filter(Detalle.periodo_id == periodo.id).delete(synchronize_session=False)
+    db.query(Resultado).filter(Resultado.periodo_id == periodo.id).delete(synchronize_session=False)
+    alertas: List[str] = []
+    n = 0
+    for emp in (db.query(Empleado).filter(Empleado.empresa_id == periodo.empresa_id, Empleado.fecha_ingreso <= periodo.fecha_fin,
+                                          or_(Empleado.fecha_cese.is_(None), Empleado.fecha_cese >= periodo.fecha_inicio))
+                .order_by(Empleado.apellidos, Empleado.nombres)):
+        nombre = f"{emp.apellidos}, {emp.nombres}"
+        if emp.fecha_ingreso > dia15:
+            alertas.append(f"{nombre}: ingresó después del 15, no recibe adelanto de quincena.")
+            continue
+        if emp.fecha_cese is not None and emp.fecha_cese < dia15:
+            alertas.append(f"{nombre}: cesó antes del 15, no recibe adelanto de quincena.")
+            continue
+        sueldo = sueldo_a_fecha(db, emp.id, max(periodo.fecha_inicio, emp.fecha_ingreso))
+        if sueldo is None:
+            alertas.append(f"{nombre}: sin sueldo vigente, no se calculó su adelanto.")
+            continue
+        adelanto = R.q2(sueldo * valor / 100) if pct else R.q2(valor)
+        if adelanto <= 0:
+            continue
+        formula = f"{sueldo} × {valor:.2f} % del sueldo" if pct else f"monto fijo S/ {adelanto}"
+        db.add(Detalle(periodo_id=periodo.id, empleado_id=emp.id, concepto_codigo="@ADELANTO_QUINCENA", categoria="INGRESO",
+                       monto=adelanto, origen="CALCULO", formula=formula))
+        db.add(Resultado(periodo_id=periodo.id, empleado_id=emp.id, remuneracion_computable=adelanto, total_descuentos=CERO,
+                         neto_a_pagar=adelanto, snapshot={"colaborador": nombre, "documento": emp.documento_identidad, "puesto": emp.puesto,
+                                                          "sede": emp.sede, "banco": emp.banco, "cuenta": emp.numero_cuenta, "sueldo": str(sueldo),
+                                                          "tipo": "ADELANTO_QUINCENA", "diccionario": f"{dic.codigo} v{dic.version}",
+                                                          "modo": empresa.quincena_modo, "valor": str(valor)}))
+        if not emp.numero_cuenta:
+            alertas.append(f"{nombre}: sin cuenta de abono.")
+        n += 1
+    if n == 0:
+        raise ErrorDeNegocio("No hay colaboradores con adelanto de quincena en este mes.", 409)
+    db.commit()
+    alertas.append("La quincena es un adelanto: no calcula aportes ni 5ta. Después de procesarla (o corregirla), vuelva a procesar la planilla de fin de mes para que la descuente.")
+    return {"colaboradores": n, "alertas": alertas, "bloqueados_por_liquidacion": 0, "tipo": "ADELANTO"}
+
+
 def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
+    if periodo.fase == FASE_QUINCENA:
+        return recalcular_quincena(db, periodo)
     exigir_abierto(periodo)
     dic = db.get(Diccionario, periodo.diccionario_id)
-    pr: ParametrosPeriodo = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, periodo_id=periodo.id)
+    pr: ParametrosPeriodo = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id, periodo_id=periodo.id)
     fi, ff = periodo.fecha_inicio, periodo.fecha_fin
     base = int(pr["BASE_DIAS"])
 
@@ -136,8 +184,12 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
     q_res.delete(synchronize_session=False)
 
     alertas: List[str] = []
-    if periodo_vigente(db, periodo).id != periodo.id:
-        alertas.append("Este periodo es otra fase del mes: no cuenta para la 5ta acumulada, los promedios ni la liquidación (manda «Fin de Mes»).")
+    # adelantos de quincena del mes (si la empresa los usa): se descuentan en esta boleta como @QUINCENA
+    quincena_pagada: Dict[int, Decimal] = {}
+    for r_q, p_q in (db.query(Resultado, Periodo).join(Periodo, Periodo.id == Resultado.periodo_id)
+                     .filter(Periodo.empresa_id == periodo.empresa_id, Periodo.anio == periodo.anio, Periodo.mes == periodo.mes,
+                             Periodo.fase == FASE_QUINCENA)):
+        quincena_pagada[r_q.empleado_id] = D(r_q.neto_a_pagar)
     for emp in empleados:
         if emp.id in bloqueados:
             continue
@@ -211,6 +263,10 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
             if cod in HANDLED_NOVEDADES:
                 continue
             add(cod, val, "Novedad cargada", origen="NOVEDAD")
+
+        # ---- adelanto de quincena ya pagado: se descuenta (salvo que el usuario cargue @QUINCENA a mano como novedad)
+        if "@QUINCENA" not in nov and quincena_pagada.get(emp.id):
+            add("@QUINCENA", quincena_pagada[emp.id], "Adelanto de quincena pagado en el mes")
 
         # ---- gratificación y bonificación de julio y diciembre (si el usuario no las cargó como novedad)
         if "@GRATIFICACION" not in nov and "@BONIF_EXTRA_29351" not in nov:

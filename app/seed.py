@@ -149,6 +149,9 @@ CONCEPTOS_LIQUIDACION = [
     ("@VACACIONES_TRUNCAS", "Vacaciones truncas", "INGRESO", "FORMULA", True, 1, 1, 0, 1, "0118"),
     ("@INDEMNIZACION_DESPIDO", "Indemnización por despido arbitrario", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
     ("@DEVOLUCION_5TA", "Devolución de retención de 5ta categoría", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
+    ("@SUMA_GRACIOSA", "Suma graciosa (liberalidad)", "INGRESO", "FORMULA", False, 0, 1, 0, 0, None),     # afecta a 5ta (decisión del dueño)
+    ("@ADELANTO_QUINCENA", "Adelanto de quincena", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
+    ("@DESCUENTOS_OTROS", "Descuentos otros", "DESCUENTO", "FORMULA", False, 0, 0, 0, 0, None),
 ]
 
 
@@ -166,6 +169,9 @@ def completar_rg728(db: Session) -> None:
     for a in db.query(DiccionarioAFP).filter(DiccionarioAFP.diccionario_id == dic.id):
         if (a.comision_saldo or 0) == 0 and a.nombre.upper() in AFP_SALDO:          # bases creadas antes de esta columna
             a.comision_saldo = Decimal(AFP_SALDO[a.nombre.upper()])
+    for c in db.query(Concepto).filter(Concepto.diccionario_id == dic.id, Concepto.codigo == "@SUMA_GRACIOSA"):
+        if not c.afecta_5ta_regular:                 # bases creadas cuando la suma graciosa aún no afectaba a 5ta
+            c.afecta_5ta_regular = True
     codigos = {c.codigo for c in db.query(Concepto).filter(Concepto.diccionario_id == dic.id)}
     for cod, desc, cat, nat, calc, afp, r5, d5, ess, plame in CONCEPTOS_LIQUIDACION:
         if cod not in codigos:

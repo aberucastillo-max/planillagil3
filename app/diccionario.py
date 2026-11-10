@@ -64,7 +64,8 @@ class ParametrosPeriodo:
         return self.p[clave]
 
 
-def cargar_parametros(db: Session, diccionario_id: int, fecha: date, extra=(), periodo_id: Optional[int] = None) -> ParametrosPeriodo:
+def cargar_parametros(db: Session, diccionario_id: int, fecha: date, extra=(), periodo_id: Optional[int] = None,
+                      empresa_id: Optional[int] = None) -> ParametrosPeriodo:
     vig: Dict[str, DiccionarioParametro] = {}
     for r in db.query(DiccionarioParametro).filter(DiccionarioParametro.diccionario_id == diccionario_id):
         if _vigente(r, fecha) and (r.clave not in vig or r.vigente_desde > vig[r.clave].vigente_desde):
@@ -89,6 +90,9 @@ def cargar_parametros(db: Session, diccionario_id: int, fecha: date, extra=(), p
     conceptos = {c.codigo: c for c in db.query(Concepto).filter(Concepto.diccionario_id == diccionario_id)}
     susp = {s.id: s for s in db.query(TipoSuspension).filter(TipoSuspension.diccionario_id == diccionario_id)}
     valores = {k: Decimal(v.valor) for k, v in vig.items()}
+    if empresa_id is not None:                      # configuración de la empresa con periodo de aplicación (entre el Diccionario y lo editado en el periodo)
+        from .configuracion import aplicar_a_parametros
+        aplicar_a_parametros(db, empresa_id, fecha, valores, afps, conceptos, susp)
     if periodo_id is not None:                      # lo editado en el periodo (o arrastrado del mes anterior) tiene prioridad
         for r in db.query(PeriodoParametro).filter(PeriodoParametro.periodo_id == periodo_id):
             valores[r.clave] = Decimal(r.valor)

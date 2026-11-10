@@ -27,9 +27,14 @@ def preparar_base():
             for col, tipo in (("area", "VARCHAR(100)"), ("centro_costo", "VARCHAR(100)"), ("categoria", "VARCHAR(30) DEFAULT 'EMPLEADOS'"),
                               ("calificacion", "VARCHAR(60)")):
                 c.execute(text(f"ALTER TABLE empleados ADD COLUMN IF NOT EXISTS {col} {tipo}"))
+            c.execute(text("ALTER TABLE liquidacion_detalle ADD COLUMN IF NOT EXISTS descripcion VARCHAR(150)"))
+            c.execute(text("ALTER TABLE liquidacion_detalle ADD COLUMN IF NOT EXISTS manual BOOLEAN NOT NULL DEFAULT FALSE"))
             c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_comision VARCHAR(6) NOT NULL DEFAULT 'FLUJO'"))
             c.execute(text("ALTER TABLE diccionario_afp ADD COLUMN IF NOT EXISTS comision_mixta_flujo NUMERIC(7,4) NOT NULL DEFAULT 0"))
             c.execute(text("ALTER TABLE diccionario_afp ADD COLUMN IF NOT EXISTS comision_saldo NUMERIC(7,4) NOT NULL DEFAULT 0"))
+            c.execute(text("ALTER TABLE empresas ADD COLUMN IF NOT EXISTS usa_quincena BOOLEAN NOT NULL DEFAULT FALSE"))
+            c.execute(text("ALTER TABLE empresas ADD COLUMN IF NOT EXISTS quincena_modo VARCHAR(12) NOT NULL DEFAULT 'PORCENTAJE'"))
+            c.execute(text("ALTER TABLE empresas ADD COLUMN IF NOT EXISTS quincena_valor NUMERIC(12,2) NOT NULL DEFAULT 50"))
             for col, tipo in (("direccion_fiscal", "VARCHAR(255)"), ("representante_legal", "VARCHAR(150)"), ("cargo_representante", "VARCHAR(100)")):
                 c.execute(text(f"ALTER TABLE empresas ADD COLUMN IF NOT EXISTS {col} {tipo}"))
     db = SessionLocal()
