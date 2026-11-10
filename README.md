@@ -130,7 +130,7 @@ configurado por la empresa y, por último, las ediciones propias del periodo en 
 | `GET/POST /config/vigencias/{familia}`, `DELETE /config/vigencias/{familia}/{id}` | Familias: `PARAMETRO`, `TASA_AFP`, `AFECTACION`, `SUSPENSION`, `CENTRO_COSTO`, `PUESTO`, `AREA` |
 | `GET /config/catalogos/verificar?periodo_id=` | Colaboradores con centro de costo, puesto o área sin asignar, inexistente o no vigente en el periodo |
 
-El HTML (`planilla_agil_frontend_v3.html`) exige la versión `2026-11-11-f5` o posterior de la API.
+El HTML (`planilla_agil_frontend_v3.html`) exige la versión `2026-11-11-f6` o posterior de la API.
 
 ## Certificado de rentas y retenciones de quinta categoría (versión f4)
 
