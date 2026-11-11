@@ -61,3 +61,20 @@ def test_reabrir_la_liquidacion_desbloquea_la_boleta_del_mes(entorno):
     assert r.status_code == 200 and r.json()["estado"] == "SIN_CERRAR"
     assert _vista(cli, clave, B, pids[10], ana, True)["estado"] != "CERRADA"
     assert cli.post(f"{B}/planillas/{pids[10]}/recalcular", headers=H(clave)).status_code == 200                       # la boleta vuelve a procesarse
+
+
+def test_la_liquidacion_exige_recalcular_la_boleta_si_se_calculo_antes_del_cese(entorno):
+    """Si la boleta del mes se procesó antes de registrar el cese, paga el mes completo: la liquidación debe pedir recalcularla."""
+    cli, nueva = entorno
+    clave, B, ana, luis, pids = _escenario(cli, nueva)                                    # el escenario ya recalcula octubre con el cese de Ana
+    nuevo = cli.post(f"{B}/empleados", headers=H(clave), json={"nombres": "Mario", "apellidos": "Tarde Baja", "documento_identidad": "47001122", "fecha_ingreso": "2025-01-02",
+                                                               "sueldo_basico": 3000, "sistema_pensionario": "ONP", "numero_cuenta": "9"})
+    assert nuevo.status_code == 201
+    mario = nuevo.json()["id"]
+    assert cli.post(f"{B}/planillas/{pids[10]}/recalcular", headers=H(clave)).status_code == 200                       # octubre con el mes completo de Mario
+    assert cli.post(f"{B}/empleados/{mario}/baja", headers=H(clave), json={"fecha_cese": "2026-10-12", "motivo": "01"}).status_code in (200, 201)
+    r = cli.get(f"{B}/liquidaciones/vista?periodo_id={pids[10]}&empleado_id={mario}&cts_anterior_pagada=true", headers=H(clave))
+    assert r.status_code == 409 and "calculó antes de registrar el cese" in r.json()["detail"]
+    assert cli.post(f"{B}/planillas/{pids[10]}/recalcular", headers=H(clave)).status_code == 200
+    ok = cli.get(f"{B}/liquidaciones/vista?periodo_id={pids[10]}&empleado_id={mario}&cts_anterior_pagada=true", headers=H(clave))
+    assert ok.status_code == 200 and D(str(ok.json()["snapshot"]["quinta"]["detalle"]["boletas"][-1]["base"])) == D("1200.00")      # 12 de 30 días de 3,000

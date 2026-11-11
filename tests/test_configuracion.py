@@ -117,3 +117,34 @@ def test_no_se_altera_un_mes_cerrado_en_la_configuracion(entorno):
     assert cli.post(f"{B}/planillas/{pids[9]}/cerrar", headers=H(clave)).status_code == 200
     assert cli.delete(f"{V(B, 'PARAMETRO')}/{ok.json()['id']}", headers=H(clave)).status_code == 409
     assert cli.get(V(B, "PARAMETRO"), headers=H(clave)).json()["historial"][0]["editable"] is False
+
+
+def test_el_origen_de_los_valores_del_periodo_distingue_la_configuracion(entorno):
+    """Soporte de Fórmula debe decir de dónde salen los valores: Diccionario, Configuración General o edición propia del periodo."""
+    cli, nueva = entorno
+    clave, B, ana, luis, pids = _escenario(cli, nueva)
+    origen = lambda pid: cli.get(f"{B}/periodos/{pid}/parametros", headers=H(clave)).json()["origen"]
+    assert origen(pids[9]) == "DICCIONARIO"
+    assert _reg(cli, clave, B, "PARAMETRO", clave="ASIG_FAM_PCT", valor={"valor": "0.20"}, aplica_desde="2026-08").status_code == 201
+    assert origen(pids[7]) == "DICCIONARIO" and origen(pids[9]) == "CONFIGURACION"
+    p = cli.get(f"{B}/periodos/{pids[9]}/parametros", headers=H(clave)).json()
+    assert D(p["parametros"]["ASIG_FAM_PCT"]) == D("0.20")                                     # la pantalla de Soporte muestra el valor configurado
+    put = cli.put(f"{B}/periodos/{pids[9]}/parametros", headers=H(clave), json={"parametros": {**p["parametros"], "UIT": "5600"}, "afps": p["afps"]})
+    assert put.status_code == 200 and origen(pids[9]) == "PERIODO"                              # una edición propia del periodo prevalece
+
+
+def test_quitar_las_ediciones_propias_de_un_periodo_devuelve_la_configuracion(entorno):
+    """Soporte de Fórmula dejó de editarse: lo que ya estaba editado o heredado en un periodo se puede quitar para que rija la Configuración General."""
+    cli, nueva = entorno
+    clave, B, ana, luis, pids = _escenario(cli, nueva)
+    assert _reg(cli, clave, B, "PARAMETRO", clave="ASIG_FAM_PCT", valor={"valor": "0.20"}, aplica_desde="2026-08").status_code == 201
+    p = cli.get(f"{B}/periodos/{pids[9]}/parametros", headers=H(clave)).json()
+    assert cli.put(f"{B}/periodos/{pids[9]}/parametros", headers=H(clave), json={"parametros": {**p["parametros"], "ASIG_FAM_PCT": "0.30"}, "afps": p["afps"]}).status_code == 200
+    _recalc(cli, clave, B, pids[9])
+    assert _tot(cli, clave, B, pids[9])["@ASIGNACION_FAMILIAR"] == D("339.00")                  # la edición del periodo prevalece (30 % de la RMV)
+    r = cli.delete(f"{B}/periodos/{pids[9]}/parametros", headers=H(clave))
+    assert r.status_code == 200 and r.json()["origen"] == "CONFIGURACION" and D(r.json()["parametros"]["ASIG_FAM_PCT"]) == D("0.20")
+    _recalc(cli, clave, B, pids[9])
+    assert _tot(cli, clave, B, pids[9])["@ASIGNACION_FAMILIAR"] == D("226.00")                  # rige lo configurado (20 %)
+    assert cli.post(f"{B}/planillas/{pids[8]}/cerrar", headers=H(clave)).status_code == 200
+    assert cli.delete(f"{B}/periodos/{pids[8]}/parametros", headers=H(clave)).status_code == 403   # un periodo cerrado no se toca
