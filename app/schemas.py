@@ -282,3 +282,7 @@ class ConfigVigenciaIn(BaseModel):
     valor: dict
     aplica_desde: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
     nota: Optional[str] = Field(default=None, max_length=200)
+
+
+class CargaMasivaIn(BaseModel):
+    archivo_base64: str = Field(min_length=10)          # contenido del .xlsx en base64

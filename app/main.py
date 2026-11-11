@@ -13,14 +13,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from . import calculo, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
+from . import calculo, carga_masiva, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
 from .config import allowed_origins
 from .db import get_db
 from .diccionario import ErrorDeNegocio
 from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionario, DiccionarioAFP, Empleado,
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
 from .models import Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
-from .schemas import (ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
+from .schemas import (CargaMasivaIn, ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
                       RentaPreviaIn, SueldoIn, VacacionIn)
 from .security import Acceso, empresa_actual, exigir_admin, generar_api_key, get_acceso, get_cuenta, hash_key
 
@@ -139,7 +139,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-11-f6"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-11-f8"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -262,6 +262,42 @@ def listar_empleados(empresa: Empresa = Depends(empresa_actual), db: Session = D
              "sueldo_vigente": calculo.sueldo_a_fecha(db, e.id, hoy)}
             for e in db.query(Empleado).filter(Empleado.empresa_id == empresa.id)
             .order_by(Empleado.apellidos, Empleado.nombres)]
+
+
+# ----------------------------------------------------------------------------- carga masiva de trabajadores (Excel)
+def _excel_de(data: CargaMasivaIn) -> bytes:
+    import base64
+    texto = data.archivo_base64.split(",", 1)[-1].strip()
+    if len(texto) > 8_000_000:
+        raise HTTPException(413, "El archivo es demasiado grande (máximo 6 MB).")
+    try:
+        return base64.b64decode(texto, validate=False)
+    except Exception:
+        raise HTTPException(422, "No se pudo leer el archivo enviado.")
+
+
+@app.get(API + "/empresas/{empresa_id}/empleados/carga-masiva/plantilla")
+def carga_masiva_plantilla(empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Plantilla de Excel con las AFP del Diccionario vigente y los parámetros de la carga."""
+    afps = [a.nombre for a in db.query(DiccionarioAFP).filter(DiccionarioAFP.diccionario_id == empresa.diccionario_id)]
+    return Response(carga_masiva.plantilla(afps), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename=PLANTILLA_CARGA_TRABAJADORES.xlsx"})
+
+
+@app.post(API + "/empresas/{empresa_id}/empleados/carga-masiva/validar")
+def carga_masiva_validar(data: CargaMasivaIn, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    """Revisa el archivo fila por fila sin guardar nada."""
+    informe, _ = carga_masiva.analizar(db, empresa, cuenta, carga_masiva.leer_excel(_excel_de(data)))
+    return informe
+
+
+@app.post(API + "/empresas/{empresa_id}/empleados/carga-masiva/cargar")
+def carga_masiva_cargar(data: CargaMasivaIn, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    """Todo o nada: revisa de nuevo el archivo y, solo si ninguna fila tiene error, crea y actualiza en una sola operación."""
+    informe, ops = carga_masiva.analizar(db, empresa, cuenta, carga_masiva.leer_excel(_excel_de(data)))
+    if not informe["puede_cargar"]:
+        return {"cargado": False, "informe": informe}
+    return {"cargado": True, **carga_masiva.aplicar(db, empresa, ops), "informe": informe}
 
 
 @app.post(API + "/empresas/{empresa_id}/empleados", status_code=201)
@@ -484,6 +520,16 @@ def crear_periodo(data: PeriodoIn, empresa: Empresa = Depends(empresa_actual), d
 def ver_parametros(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """UIT, RMV, tasas y tasas por AFP vigentes en el periodo (editadas o arrastradas del mes anterior; si no, las del Diccionario)."""
     return parametros_periodo.efectivos(db, empresa, _periodo(db, empresa, periodo_id))
+
+
+@app.delete(API + "/empresas/{empresa_id}/periodos/{periodo_id}/parametros")
+def quitar_ediciones_parametros(periodo_id: int, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    """Quita las ediciones propias del periodo ABIERTO: vuelven a regir los valores de Configuración General (o del Diccionario). Luego hay que Recalcular."""
+    p = _periodo(db, empresa, periodo_id)
+    r = parametros_periodo.restablecer(db, empresa, p)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="QUITA_EDICIONES_PARAMETROS_PERIODO", detalle=f"{p.mes:02d}/{p.anio}"))
+    db.commit()
+    return r
 
 
 @app.put(API + "/empresas/{empresa_id}/periodos/{periodo_id}/parametros")

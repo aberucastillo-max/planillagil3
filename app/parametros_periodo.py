@@ -1,6 +1,8 @@
-"""Parámetros legales y tasas AFP EDITABLES por periodo (pestaña «Soporte de Fórmula»).
+"""Parámetros legales y tasas AFP con EDICIONES PROPIAS por periodo (antes, pestaña «Soporte de Fórmula»; la pantalla ya no las edita: los valores se
+configuran en Configuración General con su periodo de aplicación y estas ediciones solo se pueden consultar o quitar).
 Al abrir un periodo se arrastran los valores editados del mes anterior; luego el usuario puede editarlos y guardarlos
 mientras el periodo esté ABIERTO. Sin ediciones, rigen los valores del Diccionario."""
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import List
 
@@ -15,11 +17,20 @@ def _tiene_ediciones(db: Session, periodo_id: int) -> bool:
                 or db.query(PeriodoAFP).filter(PeriodoAFP.periodo_id == periodo_id).first())
 
 
+def _origen(db: Session, empresa: Empresa, periodo: Periodo) -> str:
+    """De dónde salen los valores del periodo: ediciones propias del periodo (prevalecen), configuración de la empresa o Diccionario."""
+    from .configuracion import vigentes
+    if _tiene_ediciones(db, periodo.id):
+        return "PERIODO"
+    mes = date(periodo.anio, periodo.mes, 1)
+    return "CONFIGURACION" if (vigentes(db, empresa.id, "PARAMETRO", mes) or vigentes(db, empresa.id, "TASA_AFP", mes)) else "DICCIONARIO"
+
+
 def efectivos(db: Session, empresa: Empresa, periodo: Periodo) -> dict:
     pr = cargar_parametros(db, empresa.diccionario_id, periodo.fecha_inicio, empresa_id=empresa.id, periodo_id=periodo.id)
     return {
         "periodo": {"id": periodo.id, "anio": periodo.anio, "mes": periodo.mes, "estado": periodo.estado},
-        "origen": "PERIODO" if _tiene_ediciones(db, periodo.id) else "DICCIONARIO",
+        "origen": _origen(db, empresa, periodo),
         "editable": periodo.estado == "ABIERTO",
         "parametros": {k: str(pr.p[k]) for k in EDITABLES_PERIODO if k in pr.p},
         "afps": [{"nombre": a.nombre, "aporte": str(a.aporte), "comision": str(a.comision),
@@ -91,3 +102,13 @@ def copiar_del_anterior(db: Session, periodo: Periodo) -> bool:
             db.commit()
             return True
     return False
+
+
+def restablecer(db: Session, empresa: Empresa, periodo: Periodo) -> dict:
+    """Quita las ediciones propias del periodo ABIERTO (editadas o heredadas): vuelven a regir la Configuración General y el Diccionario."""
+    if periodo.estado == "CERRADO":
+        raise ErrorDeNegocio("El periodo está CERRADO: sus parámetros son históricos y no se modifican. Reábralo con motivo para cambiarlos.", 403)
+    db.query(PeriodoParametro).filter(PeriodoParametro.periodo_id == periodo.id).delete()
+    db.query(PeriodoAFP).filter(PeriodoAFP.periodo_id == periodo.id).delete()
+    db.commit()
+    return efectivos(db, empresa, periodo)
