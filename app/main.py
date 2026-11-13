@@ -13,14 +13,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from . import calculo, carga_masiva, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
+from . import calculo, carga_masiva, carga_novedades, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
 from .config import allowed_origins
 from .db import get_db
 from .diccionario import ErrorDeNegocio
 from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionario, DiccionarioAFP, Empleado,
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
 from .models import Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
-from .schemas import (CargaMasivaIn, ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
+from .schemas import (CargaMasivaIn, CatalogoEditIn, CatalogoIn, ConfigUnicoIn, ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
                       RentaPreviaIn, SueldoIn, VacacionIn)
 from .security import Acceso, empresa_actual, exigir_admin, generar_api_key, get_acceso, get_cuenta, hash_key
 
@@ -139,7 +139,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-11-f8"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-11-f11"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -510,7 +510,7 @@ def crear_periodo(data: PeriodoIn, empresa: Empresa = Depends(empresa_actual), d
                 diccionario_id=empresa.diccionario_id)
     db.add(p)
     db.commit()
-    arrastrados = parametros_periodo.copiar_del_anterior(db, p)       # «viaja la información de un mes al otro»
+    arrastrados = parametros_periodo.heredar(db, empresa, p)            # «viaja la información de un mes al otro»
     aviso = ("La quincena es un ADELANTO: no calcula aportes ni 5ta. Procésela con «Procesar quincena»; la planilla de fin de mes la descuenta."
              if p.fase == "Quincena" else None)
     return {"id": p.id, "estado": p.estado, "parametros_arrastrados": arrastrados, "aviso": aviso}
@@ -522,16 +522,6 @@ def ver_parametros(periodo_id: int, empresa: Empresa = Depends(empresa_actual), 
     return parametros_periodo.efectivos(db, empresa, _periodo(db, empresa, periodo_id))
 
 
-@app.delete(API + "/empresas/{empresa_id}/periodos/{periodo_id}/parametros")
-def quitar_ediciones_parametros(periodo_id: int, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
-    """Quita las ediciones propias del periodo ABIERTO: vuelven a regir los valores de Configuración General (o del Diccionario). Luego hay que Recalcular."""
-    p = _periodo(db, empresa, periodo_id)
-    r = parametros_periodo.restablecer(db, empresa, p)
-    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="QUITA_EDICIONES_PARAMETROS_PERIODO", detalle=f"{p.mes:02d}/{p.anio}"))
-    db.commit()
-    return r
-
-
 @app.put(API + "/empresas/{empresa_id}/periodos/{periodo_id}/parametros")
 def guardar_parametros(periodo_id: int, data: ParametrosPeriodoIn, empresa: Empresa = Depends(empresa_actual),
                        cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
@@ -541,6 +531,35 @@ def guardar_parametros(periodo_id: int, data: ParametrosPeriodoIn, empresa: Empr
     db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="EDITA_PARAMETROS_PERIODO", detalle=f"{p.mes:02d}/{p.anio}"))
     db.commit()
     return r
+
+
+@app.get(API + "/empresas/{empresa_id}/periodos/{periodo_id}/novedades/carga-masiva/plantilla")
+def novedades_plantilla(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    p = _periodo(db, empresa, periodo_id)
+    conceptos = [(c.codigo, c.descripcion, c.categoria) for c in db.query(Concepto).filter(Concepto.diccionario_id == p.diccionario_id, Concepto.calculado.is_(False)).order_by(Concepto.categoria, Concepto.codigo)]
+    emps = [(e.documento_identidad, f"{e.apellidos}, {e.nombres}", e.estado) for e in db.query(Empleado).filter(Empleado.empresa_id == empresa.id).order_by(Empleado.apellidos)]
+    return Response(carga_novedades.plantilla(p, conceptos, emps), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename=PLANTILLA_NOVEDADES_{p.anio}{p.mes:02d}.xlsx"})
+
+
+@app.post(API + "/empresas/{empresa_id}/periodos/{periodo_id}/novedades/carga-masiva/validar")
+def novedades_validar(periodo_id: int, data: CargaMasivaIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Revisa el archivo fila por fila sin guardar nada."""
+    p = _periodo(db, empresa, periodo_id)
+    calculo.exigir_abierto(p)
+    informe, _ = carga_novedades.analizar(db, empresa, p, carga_novedades.leer_excel(_excel_de(data)))
+    return informe
+
+
+@app.post(API + "/empresas/{empresa_id}/periodos/{periodo_id}/novedades/carga-masiva/cargar")
+def novedades_cargar(periodo_id: int, data: CargaMasivaIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Todo o nada: revisa de nuevo el archivo y, solo si ninguna fila tiene error, guarda todas las novedades en una sola operación."""
+    p = _periodo(db, empresa, periodo_id)
+    calculo.exigir_abierto(p)
+    informe, ops = carga_novedades.analizar(db, empresa, p, carga_novedades.leer_excel(_excel_de(data)))
+    if not informe["puede_cargar"]:
+        return {"cargado": False, "informe": informe}
+    return {"cargado": True, **carga_novedades.aplicar(db, p, ops), "informe": informe}
 
 
 @app.put(API + "/empresas/{empresa_id}/periodos/{periodo_id}/novedades")
@@ -773,6 +792,48 @@ def asiento_contable(periodo_id: int, empresa: Empresa = Depends(empresa_actual)
     return postplanilla.asiento(db, empresa, _periodo(db, empresa, periodo_id))
 
 
+@app.get(API + "/empresas/{empresa_id}/config/catalogo/{familia}")
+def catalogo_ver(familia: str, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Centros de costo, puestos o áreas: tabla de consulta (sin periodo de aplicación ni historial)."""
+    return configuracion.cat_listar(db, empresa, familia.upper())
+
+
+@app.post(API + "/empresas/{empresa_id}/config/catalogo/{familia}", status_code=201)
+def catalogo_crear(familia: str, data: CatalogoIn, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    r = configuracion.cat_crear(db, empresa, familia.upper(), data.codigo, data.nombre, data.activo)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="CATALOGO_CREA_" + familia.upper(), detalle=data.codigo)); db.commit()
+    return r
+
+
+@app.put(API + "/empresas/{empresa_id}/config/catalogo/{familia}/{registro_id}")
+def catalogo_editar(familia: str, registro_id: int, data: CatalogoEditIn, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    r = configuracion.cat_editar(db, empresa, familia.upper(), registro_id, data.nombre, data.activo)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="CATALOGO_EDITA_" + familia.upper(), detalle=r["codigo"])); db.commit()
+    return r
+
+
+@app.delete(API + "/empresas/{empresa_id}/config/catalogo/{familia}/{registro_id}")
+def catalogo_borrar(familia: str, registro_id: int, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    r = configuracion.cat_borrar(db, empresa, familia.upper(), registro_id)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="CATALOGO_BORRA_" + familia.upper(), detalle=str(registro_id))); db.commit()
+    return r
+
+
+@app.get(API + "/empresas/{empresa_id}/config/unico/{familia}")
+def config_unico_ver(familia: str, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Afectaciones y suspensiones como dato único editable (sin periodo de aplicación ni historial)."""
+    return configuracion.unico_listar(db, empresa, familia.upper())
+
+
+@app.put(API + "/empresas/{empresa_id}/config/unico/{familia}")
+def config_unico_guardar(familia: str, data: ConfigUnicoIn, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    """Guarda las afectaciones o suspensiones. Rige para la planilla que se procese a continuación (los periodos cerrados no cambian)."""
+    r = configuracion.guardar_unico(db, empresa, familia.upper(), data.valores)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="CONFIG_UNICA_" + familia.upper(), detalle=f"{len(data.valores)} valor(es)"))
+    db.commit()
+    return r
+
+
 @app.get(API + "/empresas/{empresa_id}/config/vigencias/{familia}")
 def cfg_vigencias_listar(familia: str, periodo_id: Optional[int] = None, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """Configuración con periodo de aplicación (PARAMETRO, TASA_AFP, AFECTACION, SUSPENSION, CENTRO_COSTO, PUESTO, AREA): vigente e historial."""
@@ -850,7 +911,7 @@ _SIN_AFECTA = {"afp": False, "essalud": False, "quinta": False}
 def _flags_concepto(db: Session, periodo: Periodo) -> dict:
     """Afectaciones de cada concepto vigentes para la empresa en el mes del periodo (Diccionario más lo configurado)."""
     from .diccionario import cargar_parametros
-    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id)
+    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id, periodo_id=periodo.id)
     return {c.codigo: {"afp": bool(c.afecta_afp_onp), "essalud": bool(c.afecta_essalud), "quinta": bool(c.afecta_5ta_regular or c.afecta_5ta_directa)}
             for c in pr.conceptos.values()}
 

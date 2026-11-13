@@ -67,7 +67,7 @@ def afpnet_bytes(filas, formato: str):
 
 
 def plame_zip(db: Session, empresa: Empresa, periodo: Periodo):
-    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id)
+    pr = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id, periodo_id=periodo.id)
     prefijo = f"0601{periodo.anio}{periodo.mes:02d}{empresa.ruc}"
     horas_dia = int(pr["HORAS_DIA"])
 

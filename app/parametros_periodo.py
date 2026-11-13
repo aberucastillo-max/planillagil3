@@ -1,7 +1,8 @@
-"""Parámetros legales y tasas AFP con EDICIONES PROPIAS por periodo (antes, pestaña «Soporte de Fórmula»; la pantalla ya no las edita: los valores se
-configuran en Configuración General con su periodo de aplicación y estas ediciones solo se pueden consultar o quitar).
-Al abrir un periodo se arrastran los valores editados del mes anterior; luego el usuario puede editarlos y guardarlos
-mientras el periodo esté ABIERTO. Sin ediciones, rigen los valores del Diccionario."""
+"""Parámetros legales y tasas AFP POR PERIODO (pestaña «Parámetros y tasas» de Cálculo de Planilla).
+
+El Diccionario solo sirve para cargar el sistema la primera vez: al abrir un periodo se copian los valores del periodo anterior (o, si es el primero, los del
+Diccionario) y desde ahí los modifica el usuario (Editar, Guardar, Cancelar) mientras el periodo esté ABIERTO. Al abrir el siguiente periodo la información viaja.
+Un periodo CERRADO conserva sus valores y solo se consulta."""
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import List
@@ -17,20 +18,42 @@ def _tiene_ediciones(db: Session, periodo_id: int) -> bool:
                 or db.query(PeriodoAFP).filter(PeriodoAFP.periodo_id == periodo_id).first())
 
 
-def _origen(db: Session, empresa: Empresa, periodo: Periodo) -> str:
-    """De dónde salen los valores del periodo: ediciones propias del periodo (prevalecen), configuración de la empresa o Diccionario."""
-    from .configuracion import vigentes
+def _guardar_filas(db: Session, periodo: Periodo, pr) -> None:
+    for k in EDITABLES_PERIODO:
+        if k in pr.p:
+            db.add(PeriodoParametro(periodo_id=periodo.id, clave=k, valor=pr.p[k]))
+    for a in pr.afps.values():
+        db.add(PeriodoAFP(periodo_id=periodo.id, nombre=a.nombre.upper(), aporte=a.aporte, comision=a.comision,
+                          comision_mixta_flujo=a.comision_mixta_flujo, comision_saldo=a.comision_saldo, prima=a.prima))
+
+
+def asegurar_filas(db: Session, empresa: Empresa, periodo: Periodo) -> None:
+    """Un periodo ABIERTO anterior a esta versión (sin valores propios) guarda los que venía usando para que ya se puedan editar."""
+    if periodo.estado == "ABIERTO" and not _tiene_ediciones(db, periodo.id):
+        _guardar_filas(db, periodo, cargar_parametros(db, empresa.diccionario_id, periodo.fecha_inicio, empresa_id=empresa.id, periodo_id=periodo.id))
+        db.commit()
+
+
+def heredar(db: Session, empresa: Empresa, periodo: Periodo) -> bool:
+    """Al abrir un periodo: copia los valores del periodo anterior; si es el primero, los del Diccionario. Devuelve True si copió de un periodo anterior."""
     if _tiene_ediciones(db, periodo.id):
-        return "PERIODO"
-    mes = date(periodo.anio, periodo.mes, 1)
-    return "CONFIGURACION" if (vigentes(db, empresa.id, "PARAMETRO", mes) or vigentes(db, empresa.id, "TASA_AFP", mes)) else "DICCIONARIO"
+        return False
+    previo = (db.query(Periodo).filter(Periodo.empresa_id == periodo.empresa_id, Periodo.fecha_inicio <= periodo.fecha_inicio, Periodo.id != periodo.id,
+                                       Periodo.id < periodo.id).order_by(Periodo.fecha_inicio.desc(), Periodo.id.desc()).first())
+    if previo is not None:
+        pr = cargar_parametros(db, empresa.diccionario_id, previo.fecha_inicio, empresa_id=empresa.id, periodo_id=previo.id)
+    else:
+        pr = cargar_parametros(db, empresa.diccionario_id, periodo.fecha_inicio, empresa_id=empresa.id)
+    _guardar_filas(db, periodo, pr)
+    db.commit()
+    return previo is not None
 
 
 def efectivos(db: Session, empresa: Empresa, periodo: Periodo) -> dict:
+    asegurar_filas(db, empresa, periodo)
     pr = cargar_parametros(db, empresa.diccionario_id, periodo.fecha_inicio, empresa_id=empresa.id, periodo_id=periodo.id)
     return {
-        "periodo": {"id": periodo.id, "anio": periodo.anio, "mes": periodo.mes, "estado": periodo.estado},
-        "origen": _origen(db, empresa, periodo),
+        "periodo": {"id": periodo.id, "anio": periodo.anio, "mes": periodo.mes, "fase": periodo.fase, "estado": periodo.estado},
         "editable": periodo.estado == "ABIERTO",
         "parametros": {k: str(pr.p[k]) for k in EDITABLES_PERIODO if k in pr.p},
         "afps": [{"nombre": a.nombre, "aporte": str(a.aporte), "comision": str(a.comision),
@@ -84,31 +107,5 @@ def guardar(db: Session, empresa: Empresa, periodo: Periodo, parametros: dict, a
                 setattr(fila, k, v)
         else:
             db.add(PeriodoAFP(periodo_id=periodo.id, nombre=nombre, **vals))
-    db.commit()
-    return efectivos(db, empresa, periodo)
-
-
-def copiar_del_anterior(db: Session, periodo: Periodo) -> bool:
-    """Al abrir un periodo: copia lo editado en el periodo anterior de la empresa (si hubo ediciones)."""
-    previos = (db.query(Periodo).filter(Periodo.empresa_id == periodo.empresa_id, Periodo.fecha_inicio < periodo.fecha_inicio,
-                                        Periodo.id != periodo.id).order_by(Periodo.fecha_inicio.desc(), Periodo.id.desc()).all())
-    for prev in previos:
-        if _tiene_ediciones(db, prev.id):
-            for r in db.query(PeriodoParametro).filter(PeriodoParametro.periodo_id == prev.id):
-                db.add(PeriodoParametro(periodo_id=periodo.id, clave=r.clave, valor=r.valor))
-            for r in db.query(PeriodoAFP).filter(PeriodoAFP.periodo_id == prev.id):
-                db.add(PeriodoAFP(periodo_id=periodo.id, nombre=r.nombre, aporte=r.aporte, comision=r.comision,
-                                  comision_mixta_flujo=r.comision_mixta_flujo, comision_saldo=r.comision_saldo, prima=r.prima))
-            db.commit()
-            return True
-    return False
-
-
-def restablecer(db: Session, empresa: Empresa, periodo: Periodo) -> dict:
-    """Quita las ediciones propias del periodo ABIERTO (editadas o heredadas): vuelven a regir la Configuración General y el Diccionario."""
-    if periodo.estado == "CERRADO":
-        raise ErrorDeNegocio("El periodo está CERRADO: sus parámetros son históricos y no se modifican. Reábralo con motivo para cambiarlos.", 403)
-    db.query(PeriodoParametro).filter(PeriodoParametro.periodo_id == periodo.id).delete()
-    db.query(PeriodoAFP).filter(PeriodoAFP.periodo_id == periodo.id).delete()
     db.commit()
     return efectivos(db, empresa, periodo)

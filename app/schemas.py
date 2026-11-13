@@ -286,3 +286,18 @@ class ConfigVigenciaIn(BaseModel):
 
 class CargaMasivaIn(BaseModel):
     archivo_base64: str = Field(min_length=10)          # contenido del .xlsx en base64
+
+
+class ConfigUnicoIn(BaseModel):
+    valores: dict            # clave -> valor (afectaciones: {afp, essalud, quinta}; suspensiones: {tipo})
+
+
+class CatalogoIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=20)
+    nombre: str = Field(min_length=1, max_length=120)
+    activo: bool = True
+
+
+class CatalogoEditIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=120)
+    activo: bool = True

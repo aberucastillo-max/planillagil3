@@ -1,8 +1,9 @@
-"""Configuración con periodo de aplicación (parámetros y tasas, afectaciones, suspensiones, centros de costo, puestos y áreas).
+"""Configuración de la empresa.
 
-Regla: cada registro rige «desde un mes» y vale hasta que se registre otro posterior para la misma clave; el historial queda visible.
-Precedencia al calcular un periodo: Diccionario < configuración de la empresa (esta) < ediciones propias del periodo en «Soporte de Fórmula».
-No se registra ni se elimina un periodo de aplicación que ya alcanzó a un periodo CERRADO."""
+- Centros de costo, puestos y áreas: tablas de consulta para los demás módulos, con registro, edición y borrado. Sin periodo de aplicación ni historial.
+- Afectaciones y suspensiones: DATO ÚNICO editable (sin periodo de aplicación ni historial). Lo que se guarda rige para la planilla que se procese a continuación.
+- Parámetros y tasas AFP: ya no se configuran aquí; se editan por periodo en Cálculo de Planilla y se heredan al abrir el siguiente periodo (parametros_periodo.py).
+  Los registros antiguos de estas dos familias se conservan solo como respaldo para periodos que aún no tienen valores propios."""
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
@@ -17,6 +18,9 @@ from .postplanilla import ultimo_cerrado
 
 CATALOGOS = ("CENTRO_COSTO", "PUESTO", "AREA")
 FAMILIAS = ("PARAMETRO", "TASA_AFP", "AFECTACION", "SUSPENSION") + CATALOGOS
+FAM_UNICAS = ("AFECTACION", "SUSPENSION")                                     # dato único editable
+FAM_POR_PERIODO = ("PARAMETRO", "TASA_AFP")                                   # se editan por periodo en Cálculo de Planilla
+FECHA_UNICA = date(2000, 1, 1)
 CAMPOS_AFP = ("aporte", "comision", "comision_mixta_flujo", "comision_saldo", "prima")
 TIPOS_SUSP = ("PERFECTA", "IMPERFECTA", "SUBSIDIADA")
 CAMPO_EMPLEADO = {"CENTRO_COSTO": "centro_costo", "PUESTO": "puesto", "AREA": "area"}
@@ -54,6 +58,14 @@ def vigentes(db: Session, empresa_id: int, familia: str, mes_ref: date) -> dict:
     return salida
 
 
+def ultimos(db: Session, empresa_id: int, familia: str) -> dict:
+    """Dato único: el registro más reciente de cada clave (los antiguos con periodo de aplicación se leen como un solo valor)."""
+    salida: dict = {}
+    for r in db.query(ConfigVigencia).filter(ConfigVigencia.empresa_id == empresa_id, ConfigVigencia.familia == familia).order_by(ConfigVigencia.aplica_desde, ConfigVigencia.id):
+        salida[r.clave] = r
+    return salida
+
+
 # ---------------------------------------------------------------- aplicación al cálculo
 def aplicar_a_parametros(db: Session, empresa_id: int, fecha: date, valores: dict, afps: dict, conceptos: dict, susp: dict) -> None:
     """Superpone la configuración de la empresa vigente en el mes de `fecha`. Modifica los diccionarios recibidos (copias en memoria)."""
@@ -65,7 +77,7 @@ def aplicar_a_parametros(db: Session, empresa_id: int, fecha: date, valores: dic
         v = r.valor
         afps[k.upper()] = TasaAFP(base.nombre if base else k, Decimal(str(v["aporte"])), Decimal(str(v["comision"])), Decimal(str(v["comision_mixta_flujo"])),
                                   Decimal(str(v["comision_saldo"])), Decimal(str(v["prima"])), base.tope_prima if base else None)
-    for k, r in vigentes(db, empresa_id, "AFECTACION", mes).items():
+    for k, r in ultimos(db, empresa_id, "AFECTACION").items():
         orig = conceptos.get(k)
         if orig is None:
             continue
@@ -73,7 +85,7 @@ def aplicar_a_parametros(db: Session, empresa_id: int, fecha: date, valores: dic
         copia.afecta_afp_onp, copia.afecta_essalud, copia.afecta_5ta_regular = bool(r.valor["afp"]), bool(r.valor["essalud"]), bool(r.valor["quinta"])
         conceptos[k] = copia
     por_codigo = {s.codigo_plame: sid for sid, s in susp.items()}
-    for k, r in vigentes(db, empresa_id, "SUSPENSION", mes).items():
+    for k, r in ultimos(db, empresa_id, "SUSPENSION").items():
         sid = por_codigo.get(k)
         if sid is None:
             continue
@@ -133,9 +145,19 @@ def _fila_hist(r: ConfigVigencia, cerrado: Optional[date]) -> dict:
             "creado": r.creado.isoformat() if r.creado else None, "editable": not (cerrado and r.aplica_desde <= cerrado)}
 
 
+def _bloquear_unicas(familia: str) -> None:
+    if familia in CATALOGOS:
+        raise HTTPException(409, "Los centros de costo, puestos y áreas ya no llevan periodo de aplicación: se registran, editan y borran en Configuración General.")
+    if familia in FAM_POR_PERIODO:
+        raise HTTPException(409, "Los parámetros y las tasas AFP ya no se registran con periodo de aplicación: se editan en Cálculo de Planilla, por periodo.")
+    if familia in FAM_UNICAS:
+        raise HTTPException(409, "Las afectaciones y las suspensiones son dato único: se guardan con «Guardar» en Cálculo de Planilla, sin periodo de aplicación.")
+
+
 def registrar(db: Session, empresa: Empresa, familia: str, datos) -> dict:
     if familia not in FAMILIAS:
         raise HTTPException(404, "Familia de configuración desconocida.")
+    _bloquear_unicas(familia)
     desde = _mes(datos.aplica_desde)
     valor = _normalizar(db, empresa, familia, datos.clave, datos.valor, desde)
     cerrado = ultimo_cerrado(db, empresa.id)
@@ -151,6 +173,7 @@ def registrar(db: Session, empresa: Empresa, familia: str, datos) -> dict:
 
 
 def eliminar(db: Session, empresa: Empresa, familia: str, registro_id: int) -> dict:
+    _bloquear_unicas(familia)
     r = db.query(ConfigVigencia).filter(ConfigVigencia.id == registro_id, ConfigVigencia.empresa_id == empresa.id, ConfigVigencia.familia == familia).first()
     if not r:
         raise HTTPException(404, "Registro no encontrado.")
@@ -205,28 +228,123 @@ def _coincide(valor: str, codigo: str, nombre: str) -> bool:
 
 
 def verificar_catalogos(db: Session, empresa: Empresa, periodo_id: int) -> dict:
-    """Colaboradores cuyo centro de costo, puesto o área no existe o no está vigente en el mes del periodo.
-    Solo se revisan los catálogos que la empresa ya empezó a registrar."""
+    """Colaboradores cuyo centro de costo, puesto o área no existe en el catálogo o está inactivo. Solo se revisan los catálogos que la empresa ya empezó a llenar."""
     ref = _ref(db, empresa, periodo_id)
     p = db.get(Periodo, periodo_id)
     problemas = []
     empleados = (db.query(Empleado).filter(Empleado.empresa_id == empresa.id, Empleado.fecha_ingreso <= p.fecha_fin)
                  .filter((Empleado.fecha_cese.is_(None)) | (Empleado.fecha_cese >= p.fecha_inicio)).order_by(Empleado.apellidos).all())
     for fam in CATALOGOS:
-        todos = db.query(ConfigVigencia).filter(ConfigVigencia.empresa_id == empresa.id, ConfigVigencia.familia == fam).all()
+        todos = ultimos(db, empresa.id, fam)
         if not todos:
             continue
-        vig = vigentes(db, empresa.id, fam, ref)
-        existentes = {r.clave: r.valor["nombre"] for r in todos}
         for e in empleados:
             valor = getattr(e, CAMPO_EMPLEADO[fam]) or ""
             if not valor.strip():
                 problemas.append({"empleado_id": e.id, "colaborador": f"{e.apellidos}, {e.nombres}", "familia": fam, "valor": "", "motivo": "sin asignar"})
                 continue
-            ok = any(r.valor["activo"] and _coincide(valor, k, r.valor["nombre"]) for k, r in vig.items())
-            if ok:
+            coincide = [r for k, r in todos.items() if _coincide(valor, k, r.valor["nombre"])]
+            if any(r.valor["activo"] for r in coincide):
                 continue
-            esta = any(_coincide(valor, k, n) for k, n in existentes.items())
             problemas.append({"empleado_id": e.id, "colaborador": f"{e.apellidos}, {e.nombres}", "familia": fam, "valor": valor,
-                              "motivo": "no vigente en el periodo" if esta else "no existe en el catálogo"})
+                              "motivo": "inactivo en el catálogo" if coincide else "no existe en el catálogo"})
     return {"periodo_id": periodo_id, "referencia": ref.strftime("%Y-%m"), "problemas": problemas}
+
+
+# ---------------------------------------------------------------- catálogos: tablas de consulta con registro, edición y borrado
+def _chk_cat(familia: str) -> None:
+    if familia not in CATALOGOS:
+        raise HTTPException(404, "Catálogo desconocido (use CENTRO_COSTO, PUESTO o AREA).")
+
+
+def _fila_cat(r: ConfigVigencia, en_uso: int) -> dict:
+    return {"id": r.id, "codigo": r.clave, "nombre": r.valor["nombre"], "activo": bool(r.valor.get("activo", True)), "en_uso": en_uso}
+
+
+def cat_listar(db: Session, empresa: Empresa, familia: str) -> dict:
+    _chk_cat(familia)
+    ult = ultimos(db, empresa.id, familia)
+    todos = db.query(Empleado).filter(Empleado.empresa_id == empresa.id).all()
+    campo = CAMPO_EMPLEADO[familia]
+    items = [_fila_cat(r, sum(1 for e in todos if _coincide(getattr(e, campo) or "", k, r.valor["nombre"]))) for k, r in sorted(ult.items())]
+    return {"familia": familia, "items": items}
+
+
+def _limpiar_cat(codigo: str, nombre: str) -> tuple:
+    codigo = (codigo or "").strip(); nombre = (nombre or "").strip()
+    if not (1 <= len(codigo) <= 20):
+        raise HTTPException(422, "El código debe tener entre 1 y 20 caracteres.")
+    if not nombre or len(nombre) > 120:
+        raise HTTPException(422, "Indique el nombre (hasta 120 caracteres).")
+    return codigo, nombre
+
+
+def cat_crear(db: Session, empresa: Empresa, familia: str, codigo: str, nombre: str, activo: bool = True) -> dict:
+    _chk_cat(familia)
+    codigo, nombre = _limpiar_cat(codigo, nombre)
+    if codigo in ultimos(db, empresa.id, familia):
+        raise HTTPException(409, f"Ya existe el código {codigo}. Edítelo en la tabla.")
+    r = ConfigVigencia(empresa_id=empresa.id, familia=familia, clave=codigo, valor={"nombre": nombre, "activo": bool(activo)}, aplica_desde=FECHA_UNICA, nota="Catálogo")
+    db.add(r); db.commit()
+    return _fila_cat(r, 0)
+
+
+def _reg_cat(db: Session, empresa: Empresa, familia: str, registro_id: int) -> ConfigVigencia:
+    _chk_cat(familia)
+    r = db.query(ConfigVigencia).filter(ConfigVigencia.id == registro_id, ConfigVigencia.empresa_id == empresa.id, ConfigVigencia.familia == familia).first()
+    if not r:
+        raise HTTPException(404, "Registro no encontrado.")
+    return r
+
+
+def cat_editar(db: Session, empresa: Empresa, familia: str, registro_id: int, nombre: str, activo: bool) -> dict:
+    r = _reg_cat(db, empresa, familia, registro_id)
+    _, nombre = _limpiar_cat(r.clave, nombre)
+    db.query(ConfigVigencia).filter(ConfigVigencia.empresa_id == empresa.id, ConfigVigencia.familia == familia, ConfigVigencia.clave == r.clave, ConfigVigencia.id != r.id).delete()
+    r.valor = {"nombre": nombre, "activo": bool(activo)}; r.aplica_desde = FECHA_UNICA
+    db.commit()
+    return _fila_cat(r, 0)
+
+
+def cat_borrar(db: Session, empresa: Empresa, familia: str, registro_id: int) -> dict:
+    r = _reg_cat(db, empresa, familia, registro_id)
+    db.query(ConfigVigencia).filter(ConfigVigencia.empresa_id == empresa.id, ConfigVigencia.familia == familia, ConfigVigencia.clave == r.clave).delete()
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- afectaciones y suspensiones: dato único
+def unico_listar(db: Session, empresa: Empresa, familia: str) -> dict:
+    if familia not in FAM_UNICAS:
+        raise HTTPException(404, "Solo las afectaciones y las suspensiones son dato único.")
+    pr = cargar_parametros(db, empresa.diccionario_id, date.today())              # Diccionario puro = valores de origen
+    ult = ultimos(db, empresa.id, familia)
+    items = []
+
+    def item(clave, etiqueta, base):
+        r = ult.get(clave)
+        items.append({"clave": clave, "etiqueta": etiqueta, "base": base, "vigente": r.valor if r else base, "modificado": r is not None})
+    if familia == "AFECTACION":
+        for c in sorted((c for c in pr.conceptos.values() if c.categoria == "INGRESO"), key=lambda x: x.codigo):
+            item(c.codigo, c.descripcion, {"afp": bool(c.afecta_afp_onp), "essalud": bool(c.afecta_essalud), "quinta": bool(c.afecta_5ta_regular or c.afecta_5ta_directa)})
+    else:
+        for s in sorted(pr.suspensiones.values(), key=lambda x: x.codigo_plame):
+            item(s.codigo_plame, s.descripcion, {"tipo": s.tipo})
+    return {"familia": familia, "items": items}
+
+
+def guardar_unico(db: Session, empresa: Empresa, familia: str, valores: dict) -> dict:
+    """Guarda los valores como dato único. Un valor igual al del Diccionario no genera registro propio."""
+    base = {i["clave"]: i["base"] for i in unico_listar(db, empresa, familia)["items"]}
+    mes = date.today().replace(day=1)
+    nuevos = {}
+    for clave, valor in (valores or {}).items():
+        if clave not in base:
+            raise HTTPException(422, f"{clave} no existe en el Diccionario.")
+        nuevos[clave] = _normalizar(db, empresa, familia, clave, valor, mes)
+    for clave, v in nuevos.items():
+        db.query(ConfigVigencia).filter(ConfigVigencia.empresa_id == empresa.id, ConfigVigencia.familia == familia, ConfigVigencia.clave == clave).delete()
+        if v != base[clave]:
+            db.add(ConfigVigencia(empresa_id=empresa.id, familia=familia, clave=clave, valor=v, aplica_desde=FECHA_UNICA, nota="Dato único"))
+    db.commit()
+    return unico_listar(db, empresa, familia)
