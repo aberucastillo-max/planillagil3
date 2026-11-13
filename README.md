@@ -130,7 +130,7 @@ configurado por la empresa y, por último, las ediciones propias del periodo en 
 | `GET/POST /config/vigencias/{familia}`, `DELETE /config/vigencias/{familia}/{id}` | Familias: `PARAMETRO`, `TASA_AFP`, `AFECTACION`, `SUSPENSION`, `CENTRO_COSTO`, `PUESTO`, `AREA` |
 | `GET /config/catalogos/verificar?periodo_id=` | Colaboradores con centro de costo, puesto o área sin asignar, inexistente o no vigente en el periodo |
 
-El HTML (`planilla_agil_frontend_v3.html`) exige la versión `2026-11-11-f6` o posterior de la API.
+El HTML (`planilla_agil_frontend_v3.html`) exige la versión `2026-11-11-f11` o posterior de la API.
 
 ## Certificado de rentas y retenciones de quinta categoría (versión f4)
 
@@ -145,3 +145,51 @@ remuneraciones e ingresos de otras empresas) suman siempre la renta bruta del c�
 
 El texto del certificado usa la razón social, el RUC, el domicilio fiscal y el representante legal de la empresa, y el nombre y DNI del colaborador.
 Cerrar una liquidación congela la boleta del mes del cesado; reabrirla la desbloquea para procesarla de nuevo.
+
+## Carga masiva de trabajadores por Excel (versión f11)
+
+Reglas definidas por el dueño: **todo o nada** (con una sola fila con error no se guarda ninguna), los trabajadores que **ya existen** (mismo tipo y número
+de documento) se **actualizan** con las celdas que vengan llenas (una celda en blanco no borra datos; nombre e ingreso no se modifican) y el **sistema
+pensionario es obligatorio**. Los datos opcionales en blanco no impiden la carga: se aplican valores por defecto y, si falta algo importante (CUSPP,
+cuenta de abono), solo se avisa. Un cambio de sueldo de un trabajador existente exige la «Vigencia del nuevo sueldo». Máximo 500 filas.
+
+| Ruta (bajo `/api/v1/empresas/{empresa_id}`) | Para qué sirve |
+| --- | --- |
+| `GET /empleados/carga-masiva/plantilla` | Plantilla de Excel con las AFP del Diccionario, listas desplegables y la hoja de parámetros |
+| `POST /empleados/carga-masiva/validar` | Revisa el archivo fila por fila sin guardar nada. Cuerpo: `{"archivo_base64": "<.xlsx en base64>"}` |
+| `POST /empleados/carga-masiva/cargar` | Revisa de nuevo y, solo si no hay errores, crea y actualiza en una sola operación |
+
+## Carga masiva de novedades del periodo por Excel (versión f11)
+
+Mismas reglas que la carga masiva de personal: revisión previa fila por fila y carga **todo o nada**. Cada fila es DNI + código del concepto + monto
+(Año y Mes son opcionales y, si vienen llenos, deben coincidir con el periodo). Si el colaborador ya tiene esa novedad en el periodo se actualiza.
+Solo admite conceptos que el motor no calcula y no permite cargar a colaboradores con liquidación cerrada ni en periodos cerrados.
+
+| Ruta (bajo `/api/v1/empresas/{empresa_id}`) | Para qué sirve |
+| --- | --- |
+| `GET /periodos/{periodo_id}/novedades/carga-masiva/plantilla` | Plantilla con los conceptos que admiten carga y los colaboradores de la empresa |
+| `POST /periodos/{periodo_id}/novedades/carga-masiva/validar` | Revisa el archivo sin guardar nada. Cuerpo: `{"archivo_base64": "<.xlsx en base64>"}` |
+| `POST /periodos/{periodo_id}/novedades/carga-masiva/cargar` | Revisa de nuevo y, solo si no hay errores, guarda todo en una sola operación |
+
+## Parámetros, tasas AFP, afectaciones y suspensiones (versión f11)
+
+- **Parámetros y tasas AFP: por periodo.** El Diccionario solo carga el primer periodo; al abrir cada periodo nuevo se copian los valores del periodo anterior
+  («la información viaja») y el usuario los modifica mientras el periodo esté ABIERTO. Un periodo cerrado conserva los suyos.
+  `GET /empresas/{id}/periodos/{periodo_id}/parametros` y `PUT` (mismo cuerpo: `{"parametros": {...}, "afps": [...]}`). Lo guardado rige al procesar la planilla.
+- **Afectaciones y suspensiones: dato único** editable, sin periodo de aplicación ni historial; rige para la planilla que se procese a continuación.
+  `GET /empresas/{id}/config/unico/{AFECTACION|SUSPENSION}` y `PUT` con `{"valores": {clave: valor}}`. Un valor igual al del Diccionario no genera registro propio.
+- Los parámetros, tasas, afectaciones, suspensiones y ahora también los catálogos ya no se registran por `/config/vigencias/{familia}` (responde 409).
+
+## Catálogos: centros de costo, puestos y áreas (versión f11)
+
+Tablas de consulta para los demás módulos (el Legajo las ofrece como sugerencias), con registro, edición y borrado. **Sin periodo de aplicación ni histórico.**
+
+| Ruta (bajo `/api/v1/empresas/{empresa_id}`) | Para qué sirve |
+| --- | --- |
+| `GET /config/catalogo/{CENTRO_COSTO\|PUESTO\|AREA}` | Lista con código, nombre, estado y cuántos colaboradores lo usan |
+| `POST /config/catalogo/{familia}` | Registra `{codigo, nombre, activo}` (409 si el código ya existe) |
+| `PUT /config/catalogo/{familia}/{id}` | Edita `{nombre, activo}` (el código no cambia) |
+| `DELETE /config/catalogo/{familia}/{id}` | Borra el registro |
+
+`GET /config/catalogos/verificar?periodo_id=` avisa los colaboradores sin asignar, con un valor que no existe en el catálogo o con uno inactivo.
+Los códigos PLAME por concepto y el plan de cuentas (`/config/plame` y `/config/cuentas`) siguen con su periodo de aplicación y se editan en Configuración General.
