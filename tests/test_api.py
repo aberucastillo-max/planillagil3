@@ -182,4 +182,4 @@ def test_pagina_de_alta_inicial_sin_consola(entorno, monkeypatch):
 def test_health_informa_la_version_para_diagnosticar_despliegues(entorno):
     cli, _ = entorno
     h = cli.get("/api/v1/health").json()
-    assert h["status"] == "ok" and h["version"] == "2026-11-11-f8" and h["base"] in ("sqlite", "postgresql")
+    assert h["status"] == "ok" and h["version"] == "2026-11-11-f11" and h["base"] in ("sqlite", "postgresql")

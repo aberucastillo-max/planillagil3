@@ -29,7 +29,7 @@ def test_tasas_oficiales_incluyen_la_comision_por_saldo(entorno):
     clave, B = _empresa(cli, nueva)
     pid = cli.post(f"{B}/periodos", json={"anio": 2026, "mes": 10}, headers=H(clave)).json()["id"]
     r = cli.get(f"{B}/periodos/{pid}/parametros", headers=H(clave)).json()
-    assert r["origen"] == "DICCIONARIO" and r["editable"] and r["parametros"]["UIT"].startswith("5500")
+    assert r["editable"] and r["parametros"]["UIT"].startswith("5500")                  # el primer periodo se carga con los valores del Diccionario
     saldo = {a["nombre"]: D(a["comision_saldo"]) for a in r["afps"]}
     assert saldo == {"HABITAT": D("0.0125"), "INTEGRA": D("0.0078"), "PRIMA": D("0.0125"), "PROFUTURO": D("0.0068")}
     assert all(D(a["comision_mixta_flujo"]) == 0 for a in r["afps"])                      # el componente mensual de la mixta es 0 %
@@ -76,7 +76,7 @@ def test_parametros_editables_por_periodo_y_arrastre_al_mes_siguiente(entorno):
     r = cli.put(f"{B}/periodos/{p10}/parametros", headers=H(clave), json={
         "parametros": {"RMV": "1300", "UIT": "5600"},
         "afps": [{"nombre": "PRIMA", "aporte": "0.10", "comision": "0.0160", "comision_mixta_flujo": "0", "comision_saldo": "0.0130", "prima": "0.0150"}]})
-    assert r.status_code == 200 and r.json()["origen"] == "PERIODO" and D(r.json()["parametros"]["RMV"]) == D("1300")
+    assert r.status_code == 200 and D(r.json()["parametros"]["RMV"]) == D("1300")
     assert {a["nombre"]: D(a["comision_saldo"]) for a in r.json()["afps"]}["PRIMA"] == D("0.0130")
     cli.post(f"{B}/planillas/{p10}/recalcular", headers=H(clave))
     d = DET(cli, clave, B, p10, ana)
@@ -86,7 +86,7 @@ def test_parametros_editables_por_periodo_y_arrastre_al_mes_siguiente(entorno):
     n = cli.post(f"{B}/periodos", json={"anio": 2026, "mes": 11}, headers=H(clave)).json()
     assert n["parametros_arrastrados"] is True
     sig = cli.get(f"{B}/periodos/{n['id']}/parametros", headers=H(clave)).json()
-    assert sig["origen"] == "PERIODO" and D(sig["parametros"]["RMV"]) == D("1300")
+    assert D(sig["parametros"]["RMV"]) == D("1300")
     # y se pueden volver a editar en ese mes sin tocar el anterior
     cli.put(f"{B}/periodos/{n['id']}/parametros", headers=H(clave), json={"parametros": {"RMV": "1400"}})
     assert D(cli.get(f"{B}/periodos/{p10}/parametros", headers=H(clave)).json()["parametros"]["RMV"]) == D("1300")

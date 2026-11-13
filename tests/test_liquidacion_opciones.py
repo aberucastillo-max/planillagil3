@@ -201,6 +201,8 @@ def _afp_cese(cli, nueva, ruc, sueldo, cese):
     for m in range(1, 10):
         cli.post(f"{B}/planillas/{pids[m]}/recalcular", headers=H(clave))
     cli.post(f"{B}/empleados/{emp}/baja", headers=H(clave), json={"fecha_cese": cese, "motivo": "01"})
+    # el Diccionario solo carga el primer periodo: el tope vigente desde julio lo actualiza el usuario en el periodo de octubre
+    assert cli.put(f"{B}/periodos/{pids[10]}/parametros", headers=H(clave), json={"parametros": {"RMA_PRIMA": "12732.70"}}).status_code == 200
     return clave, B, emp, pids
 
 
@@ -232,7 +234,7 @@ def test_prima_del_seguro_boleta_mas_liquidacion_no_supera_el_tope(entorno):
     assert boleta + liq == maxima == D(p["maxima_mes"])                                  # boleta + liquidación = prima máxima, ni un céntimo más
     assert liq == D(p["adicional"]) and liq < D(p["propia_liquidacion"])
     assert "ya cobrado en la boleta 91.33" in [c["formula"] for c in v["conceptos"] if c["codigo"] == "@SEGURO_INVALIDEZ"][0]
-    # (3) el tope es el CONFIGURADO PARA EL PERIODO (Soporte de Fórmula), igual en la boleta y en la liquidación
+    # (3) el tope es el CONFIGURADO PARA EL PERIODO (Cálculo de Planilla), igual en la boleta y en la liquidación
     cli.put(f"{B}/periodos/{pids[10]}/parametros", headers=H(clave), json={"parametros": {"RMA_PRIMA": "8000"}})
     cli.post(f"{B}/planillas/{pids[10]}/recalcular", headers=H(clave))
     v = _vista_opc(cli, clave, B, pids[10], emp, cts_anterior_pagada="true")
