@@ -127,3 +127,50 @@ def avisos_consolidacion(db: Session, periodo: Periodo):
     """Solo entra lo CERRADO. Se avisa de los cesados del periodo cuya liquidación aún no está cerrada."""
     cerradas, sin_cerrar = L.consolidado(db, periodo)
     return {"incluidas": len(cerradas), "abiertas": sin_cerrar}
+
+
+def sabana_bytes(db: Session, empresa: Empresa, periodo: Periodo) -> bytes:
+    """Sábana del periodo: una fila por colaborador; datos, una columna por concepto con monto (ingresos, descuentos, aportes) y totales."""
+    from decimal import Decimal
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter as L_
+    from .models import Concepto
+    filas = _resultados(db, periodo)
+    desc = {c.codigo: (c.descripcion, c.categoria) for c in db.query(Concepto).filter(Concepto.diccionario_id == periodo.diccionario_id)}
+    det: dict = {}
+    for d in db.query(Detalle).filter(Detalle.periodo_id == periodo.id):
+        det.setdefault(d.empleado_id, {})[d.concepto_codigo] = Decimal(str(d.monto))
+    usados = {c for m in det.values() for c in m}
+    orden = {"PARAMETRO": 0, "INGRESO": 1, "DESCUENTO": 2, "APORTE": 3}
+    cods = sorted(usados, key=lambda c: (orden.get(desc.get(c, ("", "PARAMETRO"))[1], 9), c))
+    fijas = ["DNI", "Colaborador", "Puesto", "Sistema pensionario", "AFP", "Fecha de ingreso", "Fecha de cese", "Sueldo", "Días trabajados"]
+    cierre = ["Total ingresos", "Total descuentos", "Neto a pagar", "Aportes empleador", "Base previsional", "Base EsSalud", "Base 5.ª regular", "Retención 5.ª"]
+    wb = Workbook(); ws = wb.active; ws.title = f"Sabana {periodo.anio}-{periodo.mes:02d}"
+    cab = fijas + [f"{desc.get(c, (c,))[0]} ({desc.get(c, ('', ''))[1].capitalize()})" for c in cods] + cierre
+    ws.append(cab)
+    azul = PatternFill("solid", start_color="1F4FBF", end_color="1F4FBF")
+    for j in range(1, len(cab) + 1):
+        c = ws.cell(1, j); c.font = Font(bold=True, color="FFFFFF"); c.fill = azul
+        c.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+        ws.column_dimensions[L_(j)].width = 14 if j > 2 else (16 if j == 1 else 36)
+    ws.row_dimensions[1].height = 45
+    for r, e in filas:
+        m = det.get(e.id, {}); snap = r.snapshot or {}
+        ws.append([e.documento_identidad, f"{e.apellidos}, {e.nombres}", e.puesto, e.sistema_pensionario, e.afp_nombre,
+                   e.fecha_ingreso, e.fecha_cese, float(snap.get("sueldo") or 0), r.dias_trabajados]
+                  + [float(m[c]) if c in m else None for c in cods]
+                  + [float(r.remuneracion_computable), float(r.total_descuentos), float(r.neto_a_pagar), float(r.aportes_empleador),
+                     float(r.base_previsional), float(r.base_essalud), float(r.base_5ta_regular), float(r.ret_5ta_regular + r.ret_5ta_directa)])
+    for row in ws.iter_rows(min_row=2, min_col=6, max_col=7):
+        for c in row:
+            c.number_format = "dd/mm/yyyy"
+    for row in ws.iter_rows(min_row=2, min_col=8):
+        for c in row:
+            c.number_format = "#,##0.00"
+    for row in ws.iter_rows(min_row=2, min_col=9, max_col=9):
+        for c in row:
+            c.number_format = "0"
+    ws.freeze_panes = "C2"
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()

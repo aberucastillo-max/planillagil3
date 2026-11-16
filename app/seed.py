@@ -150,6 +150,8 @@ CONCEPTOS_LIQUIDACION = [
     ("@INDEMNIZACION_DESPIDO", "Indemnización por despido arbitrario", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
     ("@DEVOLUCION_5TA", "Devolución de retención de 5ta categoría", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
     ("@SUMA_GRACIOSA", "Suma graciosa (liberalidad)", "INGRESO", "FORMULA", False, 0, 1, 0, 0, None),     # afecta a 5ta (decisión del dueño)
+    ("@MOVILIDAD_ASISTENCIA", "Movilidad por asistencia", "INGRESO", "VARIABLE", False, 0, 1, 0, 0, None),   # solo afecta a 5ta (decisión del dueño)
+    ("@TARJETA_ALIMENTACION", "Tarjeta de alimentación", "INGRESO", "VARIABLE", False, 0, 1, 0, 0, None),   # solo afecta a 5ta (decisión del dueño)
     ("@ADELANTO_QUINCENA", "Adelanto de quincena", "INGRESO", "FORMULA", True, 0, 0, 0, 0, None),
     ("@DESCUENTOS_OTROS", "Descuentos otros", "DESCUENTO", "FORMULA", False, 0, 0, 0, 0, None),
 ]

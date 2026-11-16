@@ -8,7 +8,7 @@ from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from . import reglas as R
-from .diccionario import ErrorDeNegocio, ParametrosPeriodo, cargar_parametros
+from .diccionario import ErrorDeNegocio, ParametrosPeriodo, admite_carga, cargar_parametros
 from .models import (Auditoria, Ausentismo, Beneficio, Detalle, Diccionario, Empleado, Empresa, Novedad,
                      Periodo, RentaPrevia5ta, Resultado, Sueldo, Vacacion)
 
@@ -169,7 +169,7 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
         c = pr.conceptos.get(n.concepto_codigo)
         if c is None:
             raise ErrorDeNegocio(f"Novedad con concepto inexistente en el Diccionario: {n.concepto_codigo}", 422)
-        if c.calculado:
+        if not admite_carga(c):
             raise ErrorDeNegocio(f"{n.concepto_codigo} lo calcula el motor; no admite carga manual.", 422)
         novedades[n.empleado_id][n.concepto_codigo] = D(n.valor)
 
@@ -198,8 +198,16 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
         sueldo = sueldos[emp.id]
         filas: List[dict] = []
 
+        forzados = {k for k in nov if pr.conceptos[k].calculado and k not in HANDLED_NOVEDADES}   # novedad que REEMPLAZA el cálculo
+        hechos: set = set()
+
         def add(codigo, monto, formula="", origen="CALCULO"):
             c = pr.conceptos[codigo]
+            if codigo in forzados:
+                if codigo in hechos:
+                    return
+                hechos.add(codigo)
+                monto, formula, origen = nov[codigo], "Novedad cargada (reemplaza el cálculo del sistema)", "NOVEDAD"
             m = R.q2(monto)
             if m != 0:
                 filas.append({"codigo": codigo, "categoria": c.categoria, "monto": m,
@@ -260,7 +268,7 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
 
         # ---- novedades (cualquier concepto del Diccionario; ya no se descartan en silencio)
         for cod, val in nov.items():
-            if cod in HANDLED_NOVEDADES:
+            if cod in HANDLED_NOVEDADES or cod in hechos:
                 continue
             add(cod, val, "Novedad cargada", origen="NOVEDAD")
 

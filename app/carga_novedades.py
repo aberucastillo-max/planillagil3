@@ -16,7 +16,7 @@ from openpyxl.worksheet.properties import PageSetupProperties
 
 from . import liquidacion as LQ
 from .carga_masiva import _norm, _texto
-from .diccionario import ErrorDeNegocio
+from .diccionario import ErrorDeNegocio, admite_carga
 from .models import Concepto, Empleado, Novedad
 
 MAX_FILAS = 2000
@@ -112,17 +112,21 @@ def analizar(db, empresa, periodo, filas: list):
             err.append("Falta el código del concepto.")
         elif c is None:
             err.append(f"Código de concepto inválido «{cod}» (vea la hoja «Conceptos» de la plantilla).")
+        elif not admite_carga(c):
+            err.append("Este concepto no se carga en la planilla mensual (es propio de la liquidación).")
         elif c.calculado:
-            err.append("Concepto calculado por el motor: no admite carga.")
+            avi.append("Concepto calculado por el sistema: este monto REEMPLAZA el cálculo hasta que se borre la novedad.")
         if e_m:
             err.append(e_m)
         anio = _texto(v.get("anio")); mes = _mes(v.get("mes"))
         if anio and (not anio.isdigit() or int(anio) != periodo.anio):
             err.append(f"El año {anio} no coincide con el periodo elegido ({periodo.anio}).")
         if mes is not None and mes != periodo.mes:
-            err.append(f"El mes «{_texto(v.get('mes'))}» no coincide con el periodo elegido ({MESES[periodo.mes].capitalize()}).")
+            err.append(f"El mes «{_texto(v.get('mes'))}» no coincide con el periodo elegido ({periodo.mes:02d}).")
         clave = (emp.id if emp else doc, cod)
-        if clave in vistos:
+        if not cod or c is None:
+            pass  # sin código válido ya hay otro error: no sumar un aviso de repetido engañoso
+        elif clave in vistos:
             err.append(f"Colaborador y concepto repetidos: ya aparecen en la fila {vistos[clave]}.")
         else:
             vistos[clave] = v["_fila"]
@@ -167,10 +171,10 @@ def plantilla(periodo, conceptos: list, empleados: list) -> bytes:
     wb = Workbook(); w = wb.active; w.title = "Léeme"; w.sheet_view.showGridLines = False
     w.column_dimensions["A"].width = 4; w.column_dimensions["B"].width = 26; w.column_dimensions["C"].width = 92
     w["B2"] = "Planilla Ágil · Plantilla de carga masiva de novedades"; w["B2"].font = F(size=15, bold=True, color=AZUL)
-    w["B3"] = f"Periodo: {MESES[periodo.mes].capitalize()} {periodo.anio}. Todo o nada: con un solo error no se carga ninguna fila."; w["B3"].font = F(italic=True, color=GRIS)
+    w["B3"] = f"Periodo: {periodo.mes:02d}/{periodo.anio}. Todo o nada: con un solo error no se carga ninguna fila."; w["B3"].font = F(italic=True, color=GRIS)
     pasos = ["Llene la hoja «Novedades»: una fila por colaborador y concepto, desde la fila 3. La fila 2 es un ejemplo y se ignora (puede borrarla).",
-             "Obligatorias (encabezado azul): DNI, Código del concepto y Monto. Año y Mes son opcionales: si los llena deben coincidir con el periodo elegido.",
-             "Los códigos permitidos están en la hoja «Conceptos» (solo los que el motor no calcula). Puede escribirlos con o sin «@».",
+             "Obligatorias (encabezado azul): DNI, Código del concepto y Monto. Año y Mes (número 01 a 12) son opcionales: si los llena deben coincidir con el periodo elegido.",
+             "Los códigos permitidos están en la hoja «Conceptos» (incluye los que el sistema calcula: si carga uno, su monto REEMPLAZA el cálculo hasta que se borre la novedad). Puede escribirlos con o sin «@».",
              "Monto con hasta 2 decimales. Si el colaborador ya tiene esa novedad en el periodo, se actualiza con el monto del archivo.",
              "En Planilla Ágil: Cálculo de Planilla → Novedades del periodo → Masivo Conceptos → suba el archivo. Se revisa fila por fila y solo se guarda al confirmar.",
              "Después de cargar, use «Procesar Planilla» para recalcular."]
@@ -179,7 +183,7 @@ def plantilla(periodo, conceptos: list, empleados: list) -> bytes:
         w.cell(5 + i, 2, f"{i}.").font = F(bold=True); w.cell(5 + i, 2).alignment = Alignment(vertical="top", horizontal="right")
         w.cell(5 + i, 3, t).font = F(); w.cell(5 + i, 3).alignment = Alignment(wrap_text=True, vertical="top")
     n = wb.create_sheet("Novedades"); n.freeze_panes = "A3"
-    cols = [("Año", False, periodo.anio, "Opcional. Si lo llena debe ser el año del periodo."), ("Mes", False, MESES[periodo.mes].capitalize(), "Opcional. Número o nombre del mes del periodo."),
+    cols = [("Año", False, periodo.anio, "Opcional. Si lo llena debe ser el año del periodo."), ("Mes", False, f"{periodo.mes:02d}", "Opcional. Número del mes del periodo: 01 a 12."),
             ("DNI *", True, "EJEMPLO 45892134", "Obligatorio. Documento del colaborador (escríbalo como texto)."), ("Código del concepto *", True, conceptos[0][0] if conceptos else "@COMISIONES", "Obligatorio. Vea la hoja «Conceptos»."),
             ("Monto (S/) *", True, 350.50, "Obligatorio. Hasta 2 decimales.")]
     for j, (t, ob, ej, nota) in enumerate(cols, 1):
@@ -187,7 +191,7 @@ def plantilla(periodo, conceptos: list, empleados: list) -> bytes:
         c.comment = Comment(nota, "Planilla Ágil"); e = n.cell(2, j, ej); e.font = F(italic=True, color=GRIS); e.fill = fill("F1F5F9"); e.border = borde
         n.column_dimensions[L(j)].width = 24 if j != 3 else 22
     for r in range(2, 502):
-        n.cell(r, 3).number_format = "@"; n.cell(r, 5).number_format = "#,##0.00"
+        n.cell(r, 2).number_format = "@"; n.cell(r, 3).number_format = "@"; n.cell(r, 5).number_format = "#,##0.00"
     k = wb.create_sheet("Conceptos")
     for j, t in enumerate(["Código", "Descripción", "Categoría"], 1):
         c = k.cell(1, j, t); c.font = F(bold=True, color=BLANCO); c.fill = fill(AZUL)

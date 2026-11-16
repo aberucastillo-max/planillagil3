@@ -12,7 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .diccionario import ErrorDeNegocio
-from .models import (ConfigCuenta, ConfigPlame, Concepto, Detalle, Empresa, Liquidacion, LiquidacionDetalle, Periodo, Resultado)
+from .models import (ConfigCuenta, ConfigPlame, Concepto, Detalle, Empleado, Empresa, Liquidacion, LiquidacionDetalle, Periodo, Resultado)
 
 CONCEPTO_NETO = "@NETO_A_PAGAR"
 CERO = Decimal("0.00")
@@ -160,6 +160,16 @@ def asiento(db: Session, empresa: Empresa, periodo: Periodo) -> dict:
     acum, neto, n_liq = totales_por_concepto(db, periodo)
     cuentas = vigentes(db, "cuentas", empresa.id, date(periodo.anio, periodo.mes, 1))
     desc = {c.codigo: c.descripcion for c in db.query(Concepto).filter(Concepto.diccionario_id == periodo.diccionario_id)}
+    # total por concepto y centro de costo del colaborador (el lado DEBE se abre por centro de costo; el HABER va sin centro)
+    por_cc: dict = {}
+    for cod, cat, cc, m in (db.query(Detalle.concepto_codigo, Detalle.categoria, Empleado.centro_costo, Detalle.monto)
+                            .join(Empleado, Empleado.id == Detalle.empleado_id).filter(Detalle.periodo_id == periodo.id)):
+        k = (cod, cat); por_cc.setdefault(k, {}); por_cc[k][cc or ""] = por_cc[k].get(cc or "", CERO) + Decimal(str(m))
+    for cod, cat, cc, m in (db.query(LiquidacionDetalle.concepto_codigo, LiquidacionDetalle.categoria, Empleado.centro_costo, LiquidacionDetalle.monto)
+                            .join(Liquidacion, Liquidacion.id == LiquidacionDetalle.liquidacion_id)
+                            .join(Empleado, Empleado.id == Liquidacion.empleado_id)
+                            .filter(Liquidacion.periodo_id == periodo.id, Liquidacion.estado == "CERRADA")):
+        k = (cod, cat); por_cc.setdefault(k, {}); por_cc[k][cc or ""] = por_cc[k].get(cc or "", CERO) + Decimal(str(m))
     items = [(c, cat, t) for (c, cat), t in acum.items() if cat in ("INGRESO", "DESCUENTO", "APORTE")] + [(CONCEPTO_NETO, "NETO", neto)]
     lineas: dict = {}
     sin_cuenta = []
@@ -172,12 +182,58 @@ def asiento(db: Session, empresa: Empresa, periodo: Periodo) -> dict:
             sin_cuenta.append({"codigo": codigo, "descripcion": desc.get(codigo, "Neto a pagar"), "categoria": cat, "total": total})
             continue
         for lado, cta in (("debe", cfg.cuenta_debe), ("haber", cfg.cuenta_haber)):
-            if cta:
-                fila = lineas.setdefault(cta, {"cuenta": cta, "debe": CERO, "haber": CERO, "conceptos": []})
-                fila[lado] += total
-                fila["conceptos"].append(codigo)
-    out = sorted(lineas.values(), key=lambda f: f["cuenta"])
+            if not cta:
+                continue
+            if lado == "debe" and (codigo, cat) in por_cc:
+                partes = {cc: m.quantize(CERO) for cc, m in por_cc[(codigo, cat)].items() if m.quantize(CERO) != 0}
+                dif = total - sum(partes.values(), CERO)               # redondeo: se suma a la última parte para que el total cuadre
+                if partes and dif:
+                    ult = sorted(partes)[-1]; partes[ult] += dif
+            else:
+                partes = {"": total}
+            for cc, monto in partes.items():
+                fila = lineas.setdefault((cta, cc), {"cuenta": cta, "centro_costo": cc, "descripcion": "", "debe": CERO, "haber": CERO, "conceptos": []})
+                fila[lado] += monto
+                if codigo not in fila["conceptos"]:
+                    fila["conceptos"].append(codigo)
+    out = sorted(lineas.values(), key=lambda f: (f["cuenta"], f["centro_costo"]))
+    for f in out:
+        f["descripcion"] = ", ".join(desc.get(c, "Neto a pagar") for c in f["conceptos"])
     td, th = sum((f["debe"] for f in out), CERO), sum((f["haber"] for f in out), CERO)
     return {"periodo": {"id": periodo.id, "anio": periodo.anio, "mes": periodo.mes, "fase": periodo.fase, "estado": periodo.estado},
             "definitivo": periodo.estado == "CERRADO", "liquidaciones_incluidas": n_liq,
             "lineas": out, "total_debe": td, "total_haber": th, "descuadre": (td - th).quantize(CERO), "sin_cuenta": sin_cuenta}
+
+
+def asiento_xlsx(db: Session, empresa: Empresa, periodo: Periodo) -> bytes:
+    """Asiento en Excel: Cuenta, Descripción, Centro de costo, Debe, Haber, con totales y diferencia."""
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    a = asiento(db, empresa, periodo)
+    wb = Workbook(); ws = wb.active; ws.title = f"Asiento {periodo.anio}-{periodo.mes:02d}"
+    ws.append([f"Asiento contable de planilla · {periodo.mes:02d}/{periodo.anio}" + ("" if a["definitivo"] else " (PROVISIONAL: periodo abierto)")])
+    ws["A1"].font = Font(bold=True, size=13); ws.append([])
+    ws.append(["Cuenta", "Descripción", "Centro de costo", "Debe (S/)", "Haber (S/)"])
+    for j in range(1, 6):
+        c = ws.cell(3, j); c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", start_color="1F4FBF", end_color="1F4FBF")
+        c.alignment = Alignment(horizontal="center")
+    for l in a["lineas"]:
+        ws.append([l["cuenta"], l["descripcion"], l["centro_costo"], float(l["debe"]) or None, float(l["haber"]) or None])
+    n = ws.max_row
+    ws.append(["TOTALES", None, None, float(a["total_debe"]), float(a["total_haber"])])
+    ws.append(["DIFERENCIA", None, None, float(a["descuadre"]), None])
+    for r in (n + 1, n + 2):
+        for j in range(1, 6):
+            ws.cell(r, j).font = Font(bold=True)
+    for row in ws.iter_rows(min_row=4, min_col=4, max_col=5):
+        for c in row:
+            c.number_format = "#,##0.00"
+    for col, w in zip("ABCDE", (16, 60, 22, 16, 16)):
+        ws.column_dimensions[col].width = w
+    for row in ws.iter_rows(min_row=4, max_row=n, min_col=1, max_col=1):
+        for c in row:
+            c.number_format = "@"
+    ws.freeze_panes = "A4"
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()

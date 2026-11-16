@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from . import calculo, carga_masiva, carga_novedades, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
 from .config import allowed_origins
 from .db import get_db
-from .diccionario import ErrorDeNegocio
+from .diccionario import ErrorDeNegocio, admite_carga
 from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionario, DiccionarioAFP, Empleado,
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
 from .models import Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
@@ -139,7 +139,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-11-f11"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-13-f12"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -536,7 +536,7 @@ def guardar_parametros(periodo_id: int, data: ParametrosPeriodoIn, empresa: Empr
 @app.get(API + "/empresas/{empresa_id}/periodos/{periodo_id}/novedades/carga-masiva/plantilla")
 def novedades_plantilla(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     p = _periodo(db, empresa, periodo_id)
-    conceptos = [(c.codigo, c.descripcion, c.categoria) for c in db.query(Concepto).filter(Concepto.diccionario_id == p.diccionario_id, Concepto.calculado.is_(False)).order_by(Concepto.categoria, Concepto.codigo)]
+    conceptos = [(c.codigo, c.descripcion, c.categoria) for c in db.query(Concepto).filter(Concepto.diccionario_id == p.diccionario_id).order_by(Concepto.categoria, Concepto.codigo) if admite_carga(c)]
     emps = [(e.documento_identidad, f"{e.apellidos}, {e.nombres}", e.estado) for e in db.query(Empleado).filter(Empleado.empresa_id == empresa.id).order_by(Empleado.apellidos)]
     return Response(carga_novedades.plantilla(p, conceptos, emps), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f"attachment; filename=PLANTILLA_NOVEDADES_{p.anio}{p.mes:02d}.xlsx"})
@@ -581,8 +581,8 @@ def cargar_novedades(periodo_id: int, filas: List[NovedadFila], empresa: Empresa
             errores.append({"fila": i, "error": "Liquidación CERRADA: su boleta está bloqueada"})
         elif c is None:
             errores.append({"fila": i, "error": "Código de concepto inválido"})
-        elif c.calculado:
-            errores.append({"fila": i, "error": "Concepto calculado por el motor; no admite carga"})
+        elif not admite_carga(c):
+            errores.append({"fila": i, "error": "Concepto propio de la liquidación; no admite carga mensual"})
         elif not MONEY.match(f.valor.strip()):
             errores.append({"fila": i, "error": "Valor no numérico o con más de 2 decimales"})
         else:
@@ -703,8 +703,8 @@ def listar_vacaciones(empleado_id: int, empresa: Empresa = Depends(empresa_actua
 def conceptos_cargables(empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """Conceptos que el usuario puede cargar como novedad (los demás los calcula el motor)."""
     return [{"codigo": c.codigo, "descripcion": c.descripcion, "categoria": c.categoria}
-            for c in db.query(Concepto).filter(Concepto.diccionario_id == empresa.diccionario_id, Concepto.calculado.is_(False))
-            .order_by(Concepto.categoria, Concepto.codigo)]
+            for c in db.query(Concepto).filter(Concepto.diccionario_id == empresa.diccionario_id)
+            .order_by(Concepto.categoria, Concepto.codigo) if admite_carga(c)]
 
 
 @app.get(API + "/empresas/{empresa_id}/periodos/{periodo_id}/novedades")
@@ -885,6 +885,22 @@ def exportar_afpnet(periodo_id: int, formato: str = Query("xlsx", pattern="^(xls
     return Response(contenido, media_type=mime, headers={
         "Content-Disposition": f"attachment; filename={nombre}",
         "X-Avisos": _avisos_header(exportadores.avisos_consolidacion(db, p))})
+
+
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-asiento")
+def exportar_asiento(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    p = _periodo(db, empresa, periodo_id)
+    contenido = postplanilla.asiento_xlsx(db, empresa, p)
+    return Response(contenido, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={
+        "Content-Disposition": f"attachment; filename=ASIENTO_{empresa.ruc}_{p.anio}_{p.mes:02d}.xlsx"})
+
+
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-sabana")
+def exportar_sabana(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    p = _periodo(db, empresa, periodo_id)
+    contenido = exportadores.sabana_bytes(db, empresa, p)
+    return Response(contenido, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={
+        "Content-Disposition": f"attachment; filename=SABANA_{empresa.ruc}_{p.anio}_{p.mes:02d}.xlsx"})
 
 
 @app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-plame-zip")

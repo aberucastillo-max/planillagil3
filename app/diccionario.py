@@ -22,6 +22,19 @@ CLAVES_LIQUIDACION = [
 ]
 
 
+# Conceptos de la liquidación por cese: no se cargan como novedad del periodo mensual.
+LIQUIDACION_SOLO = {"@CTS_TRUNCA", "@VACACIONES_VENCIDAS", "@VACACIONES_TRUNCAS", "@INDEMNIZACION_DESPIDO",
+                    "@DEVOLUCION_5TA", "@SUMA_GRACIOSA", "@ADELANTO_QUINCENA", "@DESCUENTOS_OTROS"}
+
+
+def admite_carga(c) -> bool:
+    """Un concepto se puede cargar como novedad si no es calculado, o si es un ingreso/descuento/aporte calculado:
+    en ese caso el monto cargado REEMPLAZA el cálculo del motor hasta que se borre la novedad."""
+    if c.codigo in LIQUIDACION_SOLO:
+        return not c.calculado      # lo que ya era cargable sigue igual; lo calculado de la liquidación no
+    return (not c.calculado) or c.categoria in ("INGRESO", "DESCUENTO", "APORTE")
+
+
 class ErrorDeNegocio(Exception):
     def __init__(self, mensaje: str, codigo: int = 422):
         super().__init__(mensaje)

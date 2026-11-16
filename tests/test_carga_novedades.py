@@ -33,7 +33,8 @@ def test_plantilla_con_los_conceptos_que_admiten_carga(entorno):
     wb = load_workbook(io.BytesIO(r.content))
     assert wb.sheetnames == ["Léeme", "Novedades", "Conceptos", "Colaboradores"]
     codigos = [c.value for c in wb["Conceptos"]["A"]][1:]
-    assert "@COMISIONES" in codigos and "@HABER_BASICO" not in codigos                       # solo los que el motor no calcula
+    assert "@COMISIONES" in codigos and "@HABER_BASICO" in codigos and "@MOVILIDAD_ASISTENCIA" in codigos   # incluye los calculados (reemplazan)
+    assert "@CTS_TRUNCA" not in codigos and "@DIAS_FALTAS" not in codigos                      # liquidación y parámetros no
     assert [c.value for c in wb["Novedades"][1]][2:] == ["DNI *", "Código del concepto *", "Monto (S/) *"]
 
 
@@ -43,7 +44,7 @@ def test_cargar_novedades_con_revision_previa_y_actualizacion(entorno):
     pid = pids[10]
     otro = cli.post(f"{B}/empleados", headers=H(clave), json={"nombres": "Mario", "apellidos": "Novedad", "documento_identidad": "47001122", "fecha_ingreso": "2025-01-02",
                     "sueldo_basico": 3000, "sistema_pensionario": "ONP"}).json()
-    filas = [[2026, "Octubre", "47001122", "@COMISIONES", 350.5], [None, None, "47001122", "descuentos_otros", "20,25"]]    # sin «@» y con coma decimal
+    filas = [[2026, "10", "47001122", "@COMISIONES", 350.5], [None, None, "47001122", "descuentos_otros", "20,25"]]    # sin «@» y con coma decimal
     v = cli.post(f"{URL(B, pid)}/validar", headers=H(clave), json={"archivo_base64": _xlsx(filas)}).json()
     assert v["puede_cargar"] and v["resumen"]["nuevas"] == 2 and v["filas"][1]["codigo"] == "@DESCUENTOS_OTROS" and v["filas"][1]["monto"] == "20.25"
     assert _nov(cli, clave, B, pid) == {}                                                       # revisar no guarda nada
@@ -63,7 +64,7 @@ def test_todo_o_nada_y_cada_error_con_su_fila(entorno):
     filas = [[None, None, "47001122", "@COMISIONES", 100],              # fila 2: válida
              [None, None, "99999999", "@COMISIONES", 100],              # 3: DNI inexistente
              [None, None, "47001122", "@NOEXISTE", 100],                # 4: código inválido
-             [None, None, "47001122", "@HABER_BASICO", 100],            # 5: concepto calculado
+             [None, None, "47001122", "@CTS_TRUNCA", 100],            # 5: concepto propio de la liquidación
              [None, None, "47001122", "@HEXT_25", "10.555"],            # 6: más de 2 decimales
              [None, None, "47001122", "@COMISIONES", 50],               # 7: repetida
              [2025, None, "47001122", "@SUMA_GRACIOSA", 10],            # 8: año de otro periodo
@@ -72,7 +73,7 @@ def test_todo_o_nada_y_cada_error_con_su_fila(entorno):
     assert r["cargado"] is False and r["informe"]["resumen"]["con_error"] == 7 and r["informe"]["puede_cargar"] is False
     assert _nov(cli, clave, B, pid) == {}                                                       # ni siquiera la fila válida se guardó
     err = {f["fila"]: " ".join(f["errores"]) for f in r["informe"]["filas"]}
-    assert not err[2] and "inexistente" in err[3] and "inválido" in err[4] and "calculado" in err[5] and "2 decimales" in err[6]
+    assert not err[2] and "inexistente" in err[3] and "inválido" in err[4] and "liquidación" in err[5] and "2 decimales" in err[6]
     assert "repetidos" in err[7] and "año" in err[8] and "mes" in err[9]
 
 
@@ -90,3 +91,33 @@ def test_periodo_cerrado_colaborador_bloqueado_y_archivos_invalidos(entorno):
     assert cli.post(f"{URL(B, pids[10])}/validar", headers=H(clave), json={"archivo_base64": base64.b64encode(b"no es un excel").decode()}).status_code == 422
     falta = cli.post(f"{URL(B, pids[10])}/validar", headers=H(clave), json={"archivo_base64": _xlsx([[None, None, "45678912", "@COMISIONES", 10]], encabezados=("Año", "Mes", "DNI *", "Código del concepto *", "Importe"))})
     assert falta.status_code == 422 and "Monto" in falta.json()["detail"]
+
+
+def test_novedad_reemplaza_el_calculo_y_conceptos_nuevos(entorno):
+    cli, nueva = entorno
+    clave, B, ana, luis, pids = _escenario(cli, nueva)
+    pid = pids[10]
+    doc = "47001122"
+    cli.post(f"{B}/empleados", headers=H(clave), json={"nombres": "Mario", "apellidos": "Novedad", "documento_identidad": doc, "fecha_ingreso": "2025-01-02",
+             "sueldo_basico": 3000, "sistema_pensionario": "ONP"})
+    filas = [[2026, "10", doc, "@HABER_BASICO", 2500], [None, None, doc, "@MOVILIDAD_ASISTENCIA", 150], [None, None, doc, "@TARJETA_ALIMENTACION", 200]]
+    v = cli.post(f"{URL(B, pid)}/validar", headers=H(clave), json={"archivo_base64": _xlsx(filas)}).json()
+    assert v["puede_cargar"] and v["filas"][0]["estado"] == "AVISO"
+    assert cli.post(f"{URL(B, pid)}/cargar", headers=H(clave), json={"archivo_base64": _xlsx(filas)}).json()["cargado"]
+    assert cli.post(f"{B}/planillas/{pid}/recalcular", headers=H(clave)).status_code == 200
+    filas = {f["documento"]: f for f in cli.get(f"{B}/planillas/{pid}/resultados", headers=H(clave)).json()["filas"]}
+    d = cli.get(f"{B}/planillas/{pid}/resultados/{[e for e in cli.get(f'{B}/empleados', headers=H(clave)).json() if e['documento'] == doc][0]['id']}/detalle", headers=H(clave)).json()
+    por = {c["codigo"]: c for c in d["conceptos"]}
+    assert D(str(por["@HABER_BASICO"]["monto"])) == D("2500.00") and por["@HABER_BASICO"]["origen"] == "NOVEDAD"
+    assert D(str(por["@MOVILIDAD_ASISTENCIA"]["monto"])) == D("150.00") and D(str(por["@TARJETA_ALIMENTACION"]["monto"])) == D("200.00")
+    assert D(str(por["@SNP_ONP"]["monto"])) == D("325.00")          # 13 % de 2 500: los únicos afectos a ONP son el haber (movilidad y tarjeta no afectan)
+
+
+def test_exportar_sabana(entorno):
+    cli, nueva = entorno
+    clave, B, ana, luis, pids = _escenario(cli, nueva)
+    r = cli.get(f"{B}/planillas/{pids[10]}/exportar-sabana", headers=H(clave))
+    assert r.status_code == 200 and "SABANA_" in r.headers["content-disposition"]
+    ws = load_workbook(io.BytesIO(r.content)).active
+    cab = [c.value for c in ws[1]]
+    assert cab[0] == "DNI" and "Neto a pagar" in cab and any("Haber básico" in str(c) for c in cab) and ws.max_row >= 3

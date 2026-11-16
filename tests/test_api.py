@@ -42,7 +42,7 @@ def test_flujo_completo(entorno):
         {"documento": "45678912", "codigo": "@COMISIONES", "valor": "350.505"},
         {"documento": "99999999", "codigo": "@COMISIONES", "valor": "10"},
         {"documento": "45678912", "codigo": "@NOEXISTE", "valor": "10"},
-        {"documento": "45678912", "codigo": "@HABER_BASICO", "valor": "10"}])
+        {"documento": "45678912", "codigo": "@CTS_TRUNCA", "valor": "10"}])
     assert mala.status_code == 422 and len(mala.json()["errores"]) == 4
     ok = cli.put(f"{base}/periodos/{pid}/novedades", headers=H(clave), json=[
         {"documento": "45678912", "codigo": "@HEXT_25", "valor": "4"},
@@ -141,9 +141,9 @@ def test_endpoints_de_apoyo_al_frontend(entorno):
     assert cli.patch(f"{b}/empleados/{ana}", headers=H(clave), json={"afp_nombre": "NOEXISTE"}).status_code == 422
     lista = {e["documento"]: e for e in cli.get(f"{b}/empleados", headers=H(clave)).json()}
     assert lista["45678912"]["cobertura_eps"] is True and lista["45678912"]["asignacion_familiar"] is True
-    # conceptos cargables: no incluyen los calculados
+    # conceptos cargables: incluyen los calculados (reemplazan el cálculo) pero no los de liquidación ni los parámetros
     cod = {c["codigo"] for c in cli.get(f"{b}/diccionario/conceptos", headers=H(clave)).json()}
-    assert "@COMISIONES" in cod and "@HABER_BASICO" not in cod
+    assert "@COMISIONES" in cod and "@HABER_BASICO" in cod and "@MOVILIDAD_ASISTENCIA" in cod and "@CTS_TRUNCA" not in cod
     # novedades: alta, listado, borrado y resumen
     cli.put(f"{b}/periodos/{pid}/novedades", headers=H(clave), json=[{"documento": "45678912", "codigo": "@COMISIONES", "valor": "100"}])
     nov = cli.get(f"{b}/periodos/{pid}/novedades", headers=H(clave)).json()
@@ -182,4 +182,4 @@ def test_pagina_de_alta_inicial_sin_consola(entorno, monkeypatch):
 def test_health_informa_la_version_para_diagnosticar_despliegues(entorno):
     cli, _ = entorno
     h = cli.get("/api/v1/health").json()
-    assert h["status"] == "ok" and h["version"] == "2026-11-11-f11" and h["base"] in ("sqlite", "postgresql")
+    assert h["status"] == "ok" and h["version"] == "2026-11-13-f12" and h["base"] in ("sqlite", "postgresql")

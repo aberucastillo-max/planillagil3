@@ -98,6 +98,13 @@ def test_asiento_con_plan_de_cuentas_cuadra_y_avisa_lo_que_falta(entorno):
     assert D(str(a["total_debe"])) == D(str(a["total_haber"]))
     cuentas = {f["cuenta"]: f for f in a["lineas"]}
     assert {"621101", "401101", "411101"} <= set(cuentas) and D(str(cuentas["411101"]["haber"])) > 0 and D(str(cuentas["621101"]["haber"])) == 0
+    from io import BytesIO
+    from openpyxl import load_workbook
+    x = cli.get(f"{B}/planillas/{pids[9]}/exportar-asiento", headers=H(clave))
+    assert x.status_code == 200 and "ASIENTO_" in x.headers["content-disposition"]
+    ws = load_workbook(BytesIO(x.content)).active
+    assert [c.value for c in ws[3]] == ["Cuenta", "Descripción", "Centro de costo", "Debe (S/)", "Haber (S/)"]
+    assert ws.cell(ws.max_row, 1).value == "DIFERENCIA" and ws.cell(ws.max_row, 4).value == 0
     # un periodo cerrado queda como asiento definitivo
     assert cli.post(f"{B}/planillas/{pids[9]}/cerrar", headers=H(clave)).status_code == 200
     assert cli.get(f"{B}/planillas/{pids[9]}/asiento", headers=H(clave)).json()["definitivo"] is True
