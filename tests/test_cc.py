@@ -76,3 +76,15 @@ def test_validaciones_cc(entorno):
     cli, k, eid = _cc(entorno)
     assert cli.post(f"{API}/empresas/{eid}/empleados", headers=H(k), json={"nombres": "A", "apellidos": "B", "documento_identidad": "40000010", "fecha_ingreso": "2026-01-02"}).status_code == 422
     assert cli.post(f"{API}/empresas/{eid}/periodos", headers=H(k), json={"anio": 2026, "mes": 6, "fase": "Semana", "fecha_inicio": "2026-06-02"}).status_code == 422   # no es lunes
+
+
+def test_carga_masiva_cc_toma_jornal_de_las_tarifas(entorno):
+    from app import carga_masiva as CM
+    from app.models import Cuenta, Empresa
+    cli, k, eid = _cc(entorno)
+    db = SessionLocal(); emp = db.get(Empresa, eid); cuenta = db.get(Cuenta, emp.cuenta_id)
+    fila = {"_fila": 2, "apellidos": "PEREZ", "nombres": "LUIS", "documento": "40000077", "fecha_ingreso": "02/01/2026", "sistema_pensionario": "ONP", "tipo_obrero": "PEON"}
+    r = CM.analizar(db, emp, cuenta, [fila, {**fila, "_fila": 3, "documento": "40000078", "tipo_obrero": ""}])
+    db.close()
+    txt = str(r)
+    assert "Tipo de obrero obligatorio" in txt and "CREAR" in txt

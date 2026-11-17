@@ -531,7 +531,7 @@ def eliminar_renta_previa(empleado_id: int, renta_id: int, empresa: Empresa = De
 # ------------------------------------------------------------------ periodos y cálculo
 @app.get(API + "/empresas/{empresa_id}/periodos")
 def listar_periodos(empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
-    return [{"id": p.id, "anio": p.anio, "mes": p.mes, "fase": p.fase, "estado": p.estado}
+    return [{"id": p.id, "anio": p.anio, "mes": p.mes, "fase": p.fase, "estado": p.estado, "inicio": p.fecha_inicio, "fin": p.fecha_fin}
             for p in db.query(Periodo).filter(Periodo.empresa_id == empresa.id).order_by(Periodo.anio.desc(), Periodo.mes.desc())]
 
 

@@ -23,6 +23,7 @@ from openpyxl.worksheet.properties import PageSetupProperties
 
 from fastapi import HTTPException
 
+from .cc import TIPOS_OBRERO
 from .diccionario import ErrorDeNegocio
 from .liquidacion import exigir_sin_liquidacion_cerrada
 from .models import DiccionarioAFP, Empleado, Sueldo
@@ -52,6 +53,7 @@ COLS = [
     ("area", "Área", "Texto", P, "Nombre del área.", "Nuevo: sin área. Existente: no cambia.", "ADMINISTRACION Y GH", "Si la empresa registró el catálogo de áreas, Cálculo avisa a quienes no coincidan."),
     ("centro_costo", "Centro de costo", "Texto", P, "Código y nombre, por ejemplo 000001101 ADMINISTRATIVO.", "Nuevo: sin centro de costo. Existente: no cambia.", "000001101 ADMINISTRATIVO", "Igual que el área."),
     ("regimen", "Régimen laboral", "Lista", P, "RG_728 · MYPE_MICRO · MYPE_PEQUENA (también: Régimen General, Microempresa, Pequeña empresa).", "Se asume el régimen de la empresa.", "RG_728", "Debe ser el de la empresa: el régimen se define al registrarla (Configuración General → Empresas)."),
+    ("tipo_obrero", "Tipo de obrero", "Lista", C, "OPERARIO · OFICIAL · PEON · OP_EQUIPO_MEDIANO · OP_EQUIPO_PESADO · OP_ELECTROMECANICO · OP_TOPOGRAFO", "Obligatorio en empresas de Construcción Civil (el jornal sale de las tarifas); en otras se ignora.", "PEON", "La obra va en la columna «Centro de costo»."),
     ("categoria", "Categoría", "Texto", P, "Categoría de planilla.", "Nuevo: EMPLEADOS. Existente: no cambia.", "EMPLEADOS", ""),
     ("calificacion", "Calificación", "Texto", P, "Por ejemplo: CONFIANZA - NO FISCAL.", "Nuevo: sin calificación. Existente: no cambia.", "", ""),
     ("banco", "Banco", "Lista", P, "BCP · BBVA · INTERBANK · SCOTIABANK (se admite otro texto).", "Nuevo: sin banco. Existente: no cambia.", "BCP", ""),
@@ -202,9 +204,17 @@ def analizar(db, empresa, cuenta, filas: list):
         elif ingreso is None: err.append("Falta la fecha de ingreso.")
         sueldo, e2 = _numero(v.get("sueldo"))
         if e2: err.append("Sueldo: " + e2)
-        elif sueldo is None: err.append("Falta el sueldo básico.")
+        elif sueldo is None:
+            if empresa.regimen_codigo != "CONSTRUCCION_CIVIL": err.append("Falta el sueldo básico.")
         elif sueldo <= 0: err.append("El sueldo debe ser mayor que cero.")
         else: sueldo = sueldo.quantize(Decimal("0.01"))
+        tob = txt("tipo_obrero").upper()
+        if empresa.regimen_codigo == "CONSTRUCCION_CIVIL":
+            if tob not in TIPOS_OBRERO:
+                err.append("Tipo de obrero obligatorio: " + ", ".join(TIPOS_OBRERO) + ".")
+            elif sueldo is None and ingreso:
+                from .cc import tarifas_vigentes
+                sueldo = Decimal(next(t["valor"] for t in tarifas_vigentes(db, empresa, ingreso) if t["clave"] == "JORNAL_" + TIPOS_OBRERO[tob][1])).quantize(Decimal("0.01"))
         sp = txt("sistema_pensionario").upper()
         if sp not in ("AFP", "ONP"):
             err.append("Falta el sistema pensionario (AFP u ONP)." if not sp else f"Sistema pensionario «{sp}» no válido (use AFP u ONP).")
@@ -256,7 +266,7 @@ def analizar(db, empresa, cuenta, filas: list):
                                     tipo_comision=(tc or "FLUJO") if sp == "AFP" else "FLUJO", asignacion_familiar=bool(asig), cobertura_eps=bool(eps),
                                     tipo_contrato=contrato or "INDEFINIDO", fecha_fin_contrato=fin if (contrato or "INDEFINIDO") == "PLAZO_FIJO" else None,
                                     puesto=txt("puesto").upper() or None, sede=txt("sede") or None, area=txt("area") or None,
-                                    centro_costo=txt("centro_costo") or None, categoria=txt("categoria") or "EMPLEADOS", calificacion=txt("calificacion") or None,
+                                    centro_costo=txt("centro_costo") or None, categoria=txt("categoria") or ("OBREROS" if empresa.regimen_codigo == "CONSTRUCCION_CIVIL" else "EMPLEADOS"), tipo_obrero=tob or None, calificacion=txt("calificacion") or None,
                                     banco=txt("banco") or None, numero_cuenta=txt("numero_cuenta") or None))
         elif emp is not None and not err:
             cambios, setv = [], {}
@@ -337,7 +347,7 @@ def aplicar(db, empresa, ops: list) -> dict:
                              documento_identidad=d["documento_identidad"], puesto=d["puesto"], sede=d["sede"], fecha_ingreso=d["fecha_ingreso"],
                              sistema_pensionario=d["sistema_pensionario"], afp_nombre=d["afp_nombre"], cuspp=d["cuspp"], banco=d["banco"],
                              numero_cuenta=d["numero_cuenta"], asignacion_familiar=d["asignacion_familiar"], cobertura_eps=d["cobertura_eps"],
-                             regimen_codigo=empresa.regimen_codigo, tipo_contrato=d["tipo_contrato"], fecha_fin_contrato=d["fecha_fin_contrato"], area=d["area"],
+                             regimen_codigo=empresa.regimen_codigo, tipo_obrero=d.get("tipo_obrero"), tipo_contrato=d["tipo_contrato"], fecha_fin_contrato=d["fecha_fin_contrato"], area=d["area"],
                              centro_costo=d["centro_costo"], categoria=d["categoria"], calificacion=d["calificacion"], tipo_comision=d["tipo_comision"])
                 db.add(e); db.flush()
                 db.add(Sueldo(empleado_id=e.id, monto=d["sueldo"], fecha_vigencia=d["fecha_ingreso"], motivo="Sueldo inicial de contrato"))
