@@ -52,6 +52,7 @@ class Empresa(Base):
     norma_mype = Column(String(12), nullable=False, default="DS_013_2013")      # DS_013_2013 | LEY_32353 (solo MYPE)
     salud_micro = Column(String(8), nullable=False, default="ESSALUD")          # SIS | ESSALUD (solo microempresa)
     asig_fam_mype = Column(Boolean, nullable=False, default=True)               # la empresa MYPE paga asignación familiar
+    cc_beneficios_semanales = Column(Boolean, nullable=False, default=True)     # Construcción Civil: los beneficios (15 %, 10 %, gratificación) se pagan en la semana
     creado_en = Column(DateTime(timezone=True), default=_now)
     __table_args__ = (UniqueConstraint("cuenta_id", "ruc", name="uq_empresa_cuenta_ruc"),)
 
@@ -172,6 +173,7 @@ class Empleado(Base):
     centro_costo = Column(String(100))
     categoria = Column(String(30), default="EMPLEADOS")
     calificacion = Column(String(60))
+    tipo_obrero = Column(String(30))                      # Construcción Civil: OPERARIO | OFICIAL | PEON | OP_EQUIPO_MEDIANO ...
     tipo_comision = Column(String(6), nullable=False, default="FLUJO")      # FLUJO | MIXTA (comisión por saldo): define la comisión de planilla
     __table_args__ = (
         UniqueConstraint("empresa_id", "tipo_documento", "documento_identidad", name="uq_emp_doc"),
@@ -495,3 +497,14 @@ class ResetClave(Base):
     token_hash = Column(String(64), nullable=False, unique=True)
     expira = Column(DateTime(timezone=True), nullable=False)
     usado = Column(Boolean, nullable=False, default=False)
+
+
+class CcValor(Base):
+    """Tarifa de Construcción Civil editada por la empresa (con vigencia). Si no hay fila, rige el valor del convenio cargado en el Diccionario."""
+    __tablename__ = "cc_valores"
+    id = Column(Integer, primary_key=True)
+    empresa_id = Column(Integer, ForeignKey("empresas.id"), nullable=False, index=True)
+    clave = Column(String(40), nullable=False)
+    valor = Column(Numeric(14, 6), nullable=False)
+    vigente_desde = Column(Date, nullable=False)
+    __table_args__ = (UniqueConstraint("empresa_id", "clave", "vigente_desde", name="uq_cc_valor"),)

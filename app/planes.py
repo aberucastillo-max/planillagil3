@@ -9,6 +9,7 @@ REGIMENES = {
     "RG_728": "Régimen General (D.Leg. 728)",
     "MYPE_MICRO": "MYPE · Microempresa",
     "MYPE_PEQUENA": "MYPE · Pequeña empresa",
+    "CONSTRUCCION_CIVIL": "Construcción Civil (obreros)",
 }
 PLAN_SOLO_GENERAL = {"GRATIS"}          # el plan gratuito solo incluye el Régimen General; los demás planes incluyen todos
 
@@ -57,4 +58,6 @@ def version_dic(regimen: str, norma: str):
     """Versión del Diccionario: Régimen General = la última; MYPE = 1 (D.S. 013-2013) o 2 (Ley 32353)."""
     if regimen == "RG_728":
         return None
+    if regimen == "CONSTRUCCION_CIVIL":
+        return 1
     return 2 if norma == "LEY_32353" else 1

@@ -15,6 +15,7 @@ class EmpresaIn(BaseModel):
     norma_mype: str = Field(default="DS_013_2013", pattern="^(DS_013_2013|LEY_32353)$")
     salud_micro: str = Field(default="ESSALUD", pattern="^(SIS|ESSALUD)$")
     asig_fam_mype: bool = True
+    cc_beneficios_semanales: bool = True
     representante_dni: Optional[str] = Field(default=None, pattern=r"^\d{8}$")
     cuenta_id: Optional[int] = None        # solo lo usa el administrador, para elegir la cuenta dueña
     direccion_fiscal: Optional[str] = None
@@ -38,7 +39,8 @@ class EmpleadoIn(BaseModel):
     documento_identidad: str
     regimen: str = "RG_728"
     fecha_ingreso: date
-    sueldo_basico: float = Field(gt=0)
+    sueldo_basico: Optional[float] = Field(default=None, gt=0)      # obligatorio salvo en Construcción Civil (el jornal sale de las tarifas)
+    tipo_obrero: Optional[str] = None
     puesto: Optional[str] = None
     sede: Optional[str] = None
     sistema_pensionario: str = "ONP"
@@ -132,7 +134,8 @@ class RentaPreviaIn(BaseModel):
 class PeriodoIn(BaseModel):
     anio: int = Field(ge=2020, le=2100)
     mes: int = Field(ge=1, le=12)
-    fase: str = Field(default="Fin de Mes", pattern="^(Fin de Mes|Quincena)$")
+    fase: str = Field(default="Fin de Mes", pattern="^(Fin de Mes|Quincena|Semana)$")
+    fecha_inicio: Optional[date] = None        # solo fase «Semana»: el lunes de la semana
 
 
 class NovedadFila(BaseModel):
@@ -146,6 +149,7 @@ class ReaperturaIn(BaseModel):
 
 
 class EmpleadoPatch(BaseModel):
+    tipo_obrero: Optional[str] = None
     puesto: Optional[str] = None
     sede: Optional[str] = None
     sistema_pensionario: Optional[str] = None
@@ -206,6 +210,7 @@ class EmpresaPatch(BaseModel):
     norma_mype: Optional[str] = Field(default=None, pattern="^(DS_013_2013|LEY_32353)$")
     salud_micro: Optional[str] = Field(default=None, pattern="^(SIS|ESSALUD)$")
     asig_fam_mype: Optional[bool] = None
+    cc_beneficios_semanales: Optional[bool] = None
     razon_social: Optional[str] = Field(default=None, min_length=2, max_length=255)
     direccion_fiscal: Optional[str] = None
     representante_legal: Optional[str] = None
@@ -311,3 +316,8 @@ class CatalogoIn(BaseModel):
 class CatalogoEditIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=120)
     activo: bool = True
+
+
+class TarifasCcIn(BaseModel):
+    vigente_desde: date
+    valores: dict

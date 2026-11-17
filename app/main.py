@@ -21,7 +21,8 @@ from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionar
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
 from .models import Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
 from .schemas import (CargaMasivaIn, CatalogoEditIn, CatalogoIn, ConfigUnicoIn, ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
-                      RentaPreviaIn, SueldoIn, VacacionIn)
+                      RentaPreviaIn, SueldoIn, TarifasCcIn, VacacionIn)
+from .cc import TIPOS_OBRERO
 from .security import Acceso, empresa_actual, exigir_admin, generar_api_key, get_acceso, get_cuenta, hash_key
 
 @asynccontextmanager
@@ -142,7 +143,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-17-f15"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-17-f16"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -166,6 +167,7 @@ def listar_empresas(acceso: Acceso = Depends(get_acceso), db: Session = Depends(
              "quincena_modo": e.quincena_modo, "quincena_valor": e.quincena_valor,
              "representante_dni": e.representante_dni, "regimen": e.regimen_codigo, "regimen_nombre": planes.REGIMENES.get(e.regimen_codigo),
              "norma_mype": e.norma_mype, "salud_micro": e.salud_micro, "asig_fam_mype": bool(e.asig_fam_mype),
+             "cc_beneficios_semanales": bool(e.cc_beneficios_semanales),
              "limite_trabajadores": cuentas[e.cuenta_id].max_trabajadores, "cuenta_id": e.cuenta_id,
              "cuenta": cuentas[e.cuenta_id].nombre if acceso.admin else None}
             for e in q.order_by(Empresa.razon_social)]
@@ -197,7 +199,7 @@ def crear_empresa(data: EmpresaIn, acceso: Acceso = Depends(get_acceso), db: Ses
                 cargo_representante=data.cargo_representante, usa_quincena=data.usa_quincena,
                 quincena_modo=data.quincena_modo, quincena_valor=Decimal(str(data.quincena_valor)),
                 representante_dni=data.representante_dni, regimen_codigo=regimen, norma_mype=data.norma_mype,
-                salud_micro=data.salud_micro, asig_fam_mype=data.asig_fam_mype)
+                salud_micro=data.salud_micro, asig_fam_mype=data.asig_fam_mype, cc_beneficios_semanales=data.cc_beneficios_semanales)
     db.add(e)
     if acceso.admin:
         db.add(Auditoria(cuenta_id=cuenta.id, accion="ADMIN_CREA_EMPRESA", detalle=f"RUC {data.ruc}"))
@@ -275,7 +277,7 @@ def admin_editar_cuenta(cuenta_id: int, data: CuentaPatch, _: Acceso = Depends(e
 def listar_empleados(empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     hoy = date.today()
     return [{"id": e.id, "nombre": f"{e.apellidos}, {e.nombres}", "documento": e.documento_identidad,
-             "puesto": e.puesto, "sede": e.sede, "regimen": e.regimen_codigo,
+             "puesto": e.puesto, "sede": e.sede, "regimen": e.regimen_codigo, "tipo_obrero": e.tipo_obrero, "centro_costo": e.centro_costo,
              "sistema_pensionario": e.sistema_pensionario, "afp": e.afp_nombre, "cuspp": e.cuspp,
              "banco": e.banco, "cuenta": e.numero_cuenta, "estado": e.estado,
              "asignacion_familiar": e.asignacion_familiar, "cobertura_eps": e.cobertura_eps,
@@ -338,6 +340,15 @@ def crear_empleado(data: EmpleadoIn, empresa: Empresa = Depends(empresa_actual),
         if data.afp_nombre.upper() not in nombres:
             raise HTTPException(422, f"AFP no reconocida. Opciones: {', '.join(sorted(nombres))}")
     regimen_emp = empresa.regimen_codigo if empresa.regimen_codigo != "RG_728" else data.regimen
+    es_cc = empresa.regimen_codigo == "CONSTRUCCION_CIVIL"
+    if es_cc and data.tipo_obrero not in TIPOS_OBRERO:
+        raise HTTPException(422, "Elija el tipo de obrero: " + ", ".join(TIPOS_OBRERO))
+    if not es_cc and not data.sueldo_basico:
+        raise HTTPException(422, "Indique el sueldo básico.")
+    sueldo_ini = data.sueldo_basico
+    if es_cc and not sueldo_ini:
+        from .cc import tarifas_vigentes
+        sueldo_ini = float(next(t["valor"] for t in tarifas_vigentes(db, empresa, data.fecha_ingreso) if t["clave"] == "JORNAL_" + TIPOS_OBRERO[data.tipo_obrero][1]))
     planes.exigir_regimen(db, db.get(Cuenta, empresa.cuenta_id).plan, regimen_emp)
     e = Empleado(empresa_id=empresa.id, nombres=data.nombres.upper(), apellidos=data.apellidos.upper(),
                  tipo_documento=data.tipo_documento, documento_identidad=data.documento_identidad,
@@ -345,13 +356,13 @@ def crear_empleado(data: EmpleadoIn, empresa: Empresa = Depends(empresa_actual),
                  sistema_pensionario=data.sistema_pensionario,
                  afp_nombre=data.afp_nombre.upper() if data.afp_nombre else None, cuspp=data.cuspp,
                  banco=data.banco, numero_cuenta=data.numero_cuenta, asignacion_familiar=data.asignacion_familiar,
-                 cobertura_eps=data.cobertura_eps, regimen_codigo=regimen_emp, tipo_contrato=data.tipo_contrato,
+                 cobertura_eps=data.cobertura_eps, regimen_codigo=regimen_emp, tipo_obrero=data.tipo_obrero if es_cc else None, tipo_contrato=data.tipo_contrato,
                  fecha_fin_contrato=data.fecha_fin_contrato, area=data.area, centro_costo=data.centro_costo,
-                 categoria=data.categoria or "EMPLEADOS", calificacion=data.calificacion,
+                 categoria=("OBREROS" if es_cc and not data.categoria else data.categoria) or "EMPLEADOS", calificacion=data.calificacion,
                  tipo_comision=data.tipo_comision if data.sistema_pensionario == "AFP" else "FLUJO")
     db.add(e)
     db.flush()
-    db.add(Sueldo(empleado_id=e.id, monto=Decimal(str(data.sueldo_basico)), fecha_vigencia=data.fecha_ingreso,
+    db.add(Sueldo(empleado_id=e.id, monto=Decimal(str(sueldo_ini)), fecha_vigencia=data.fecha_ingreso,
                   motivo="Sueldo inicial de contrato"))
     db.commit()
     return {"id": e.id, "mensaje": f"{e.apellidos}, {e.nombres} registrado."}
@@ -526,6 +537,20 @@ def listar_periodos(empresa: Empresa = Depends(empresa_actual), db: Session = De
 
 @app.post(API + "/empresas/{empresa_id}/periodos", status_code=201)
 def crear_periodo(data: PeriodoIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    if data.fase == "Semana":
+        if empresa.regimen_codigo != "CONSTRUCCION_CIVIL":
+            raise HTTPException(409, "La planilla semanal es solo para empresas de Construcción Civil.")
+        if not data.fecha_inicio or data.fecha_inicio.weekday() != 0:
+            raise HTTPException(422, "Indique el lunes en que empieza la semana.")
+        ini = data.fecha_inicio
+        fin = ini + timedelta(days=6)
+        fase = f"Semana {ini.isocalendar()[1]:02d}"
+        if db.query(Periodo).filter(Periodo.empresa_id == empresa.id, Periodo.anio == fin.year, Periodo.mes == fin.month, Periodo.fase == fase).first():
+            raise HTTPException(409, "Esa semana ya existe.")
+        p = Periodo(empresa_id=empresa.id, anio=fin.year, mes=fin.month, fase=fase, fecha_inicio=ini, fecha_fin=fin, diccionario_id=empresa.diccionario_id)
+        db.add(p)
+        db.commit()
+        return {"id": p.id, "estado": p.estado, "parametros_arrastrados": 0, "aviso": None, "fase": fase}
     if data.fase == "Quincena" and not empresa.usa_quincena:
         raise HTTPException(409, "Esta empresa no tiene activada la quincena (adelanto): actívela en «Datos de la empresa».")
     if db.query(Periodo).filter(Periodo.empresa_id == empresa.id, Periodo.anio == data.anio, Periodo.mes == data.mes,
@@ -540,6 +565,58 @@ def crear_periodo(data: PeriodoIn, empresa: Empresa = Depends(empresa_actual), d
     aviso = ("La quincena es un ADELANTO: no calcula aportes ni 5ta. Procésela con «Procesar quincena»; la planilla de fin de mes la descuenta."
              if p.fase == "Quincena" else None)
     return {"id": p.id, "estado": p.estado, "parametros_arrastrados": arrastrados, "aviso": aviso}
+
+
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/semanal")
+def planilla_semanal(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Vista de la planilla semanal: una fila por obrero con sus columnas principales, agrupada por centro de costo (obra)."""
+    p = _periodo(db, empresa, periodo_id)
+    det = {}
+    for d in db.query(Detalle).filter(Detalle.periodo_id == p.id):
+        det.setdefault(d.empleado_id, {})[d.concepto_codigo] = Decimal(d.monto)
+    filas = []
+    for r, e in (db.query(Resultado, Empleado).join(Empleado, Empleado.id == Resultado.empleado_id).filter(Resultado.periodo_id == p.id)
+                 .order_by(Empleado.centro_costo, Empleado.apellidos)):
+        d = det.get(e.id, {})
+        g = lambda *cs: sum((d.get(c, Decimal(0)) for c in cs), Decimal(0))
+        filas.append({"empleado_id": e.id, "colaborador": f"{e.apellidos}, {e.nombres}", "documento": e.documento_identidad, "tipo_obrero": e.tipo_obrero,
+                      "obra": e.centro_costo or "SIN OBRA", "dias": r.dias_trabajados, "jornal": g("@JORNAL_BASICO", "@FERIADO"), "dso": g("@DSO"),
+                      "buc": g("@BUC", "@BAE"), "horas_extras": g("@HORAS_EXTRAS_60", "@HORAS_EXTRAS_100"), "movilidad": g("@MOVILIDAD_CC"),
+                      "beneficios": g("@INDEMNIZACION_CC", "@VACACIONES_TRUNCAS_CC", "@GRATIF_CC", "@BONIF_EXTRA_CC"),
+                      "total": r.remuneracion_computable, "remuneracion_asegurable": r.base_previsional, "descuentos": r.total_descuentos, "neto": r.neto_a_pagar,
+                      "aportes_empleador": r.aportes_empleador})
+    t = lambda k: sum((Decimal(f[k]) for f in filas), Decimal(0))
+    return {"periodo": {"id": p.id, "fase": p.fase, "inicio": p.fecha_inicio, "fin": p.fecha_fin, "mes": p.mes, "anio": p.anio, "estado": p.estado},
+            "totales": {"trabajadores": len(filas), "ingresos": t("total"), "descuentos": t("descuentos"), "neto": t("neto"),
+                        "costo_empleador": t("total") + t("aportes_empleador")}, "filas": filas}
+
+
+@app.get(API + "/empresas/{empresa_id}/cc/tarifas")
+def cc_tarifas(fecha: Optional[date] = None, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    """Tarifas de Construcción Civil vigentes a la fecha (convenio + lo editado por la empresa) y los tipos de obrero."""
+    from .cc import GRUPOS, tarifas_vigentes
+    if empresa.regimen_codigo != "CONSTRUCCION_CIVIL":
+        raise HTTPException(409, "La empresa no es de Construcción Civil.")
+    return {"fecha": fecha or date.today(), "grupos": GRUPOS, "tarifas": tarifas_vigentes(db, empresa, fecha or date.today()),
+            "tipos_obrero": [{"codigo": k, "nombre": v[0]} for k, v in TIPOS_OBRERO.items()]}
+
+
+@app.put(API + "/empresas/{empresa_id}/cc/tarifas")
+def cc_guardar_tarifas(data: TarifasCcIn, empresa: Empresa = Depends(empresa_actual), cuenta: Cuenta = Depends(get_cuenta), db: Session = Depends(get_db)):
+    """Registra nuevos valores desde una fecha. No toca el convenio ni los periodos ya cerrados; luego hay que Recalcular las semanas abiertas."""
+    from .cc import guardar_tarifas
+    n = guardar_tarifas(db, empresa.id, data.vigente_desde, data.valores)
+    db.add(Auditoria(cuenta_id=cuenta.id, empresa_id=empresa.id, accion="EDITA_TARIFAS_CC", detalle=f"{n} valores desde {data.vigente_desde}"))
+    db.commit()
+    return {"guardados": n}
+
+
+@app.post(API + "/empresas/{empresa_id}/cc/tarifas/restablecer")
+def cc_restablecer(empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
+    from .models import CcValor
+    n = db.query(CcValor).filter(CcValor.empresa_id == empresa.id).delete()
+    db.commit()
+    return {"borrados": n}
 
 
 @app.get(API + "/empresas/{empresa_id}/periodos/{periodo_id}/parametros")
@@ -693,6 +770,8 @@ def actualizar_empleado(empleado_id: int, data: EmpleadoPatch, empresa: Empresa 
     for campo in ("afp_nombre",):
         if cambios.get(campo):
             cambios[campo] = cambios[campo].upper()
+    if cambios.get("tipo_obrero") and cambios["tipo_obrero"] not in TIPOS_OBRERO:
+        raise HTTPException(422, "Tipo de obrero no válido: " + ", ".join(TIPOS_OBRERO))
     for campo, valor in cambios.items():
         setattr(e, campo, valor)
     if e.sistema_pensionario == "AFP":

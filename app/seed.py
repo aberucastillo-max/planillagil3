@@ -206,6 +206,32 @@ MYPE_PARAMETROS = {   # clave -> (valor, nota)
 CONCEPTO_SIS = ("@SIS", "Aporte SIS (empleador)", "APORTE", "FORMULA", True, 0, 0, 0, 0, None)
 
 
+def _clonar(db: Session, base: Diccionario, codigo: str, nombre: str, ver: int) -> Diccionario:
+    """Copia parámetros, AFP, escala de 5ta, conceptos y suspensiones del Diccionario base a uno nuevo."""
+    dic = Diccionario(codigo=codigo, nombre=nombre, version=ver, vigente_desde=DESDE)
+    db.add(dic)
+    db.flush()
+    for p in db.query(DiccionarioParametro).filter_by(diccionario_id=base.id):
+        db.add(DiccionarioParametro(diccionario_id=dic.id, clave=p.clave, valor=p.valor, vigente_desde=p.vigente_desde,
+                                    vigente_hasta=p.vigente_hasta, nota=p.nota))
+    for a in db.query(DiccionarioAFP).filter_by(diccionario_id=base.id):
+        db.add(DiccionarioAFP(diccionario_id=dic.id, nombre=a.nombre, aporte=a.aporte, comision=a.comision, prima=a.prima,
+                              comision_mixta_flujo=a.comision_mixta_flujo, comision_saldo=a.comision_saldo,
+                              tope_prima=a.tope_prima, vigente_desde=a.vigente_desde, vigente_hasta=a.vigente_hasta))
+    for e in db.query(DiccionarioEscala5ta).filter_by(diccionario_id=base.id):
+        db.add(DiccionarioEscala5ta(diccionario_id=dic.id, desde_uit=e.desde_uit, hasta_uit=e.hasta_uit, tasa=e.tasa))
+    for c in db.query(Concepto).filter_by(diccionario_id=base.id):
+        db.add(Concepto(diccionario_id=dic.id, codigo=c.codigo, descripcion=c.descripcion, categoria=c.categoria,
+                        naturaleza=c.naturaleza, calculado=c.calculado, afecta_afp_onp=c.afecta_afp_onp,
+                        afecta_5ta_regular=c.afecta_5ta_regular, afecta_5ta_directa=c.afecta_5ta_directa,
+                        afecta_essalud=c.afecta_essalud, codigo_plame=c.codigo_plame))
+    for s in db.query(TipoSuspension).filter_by(diccionario_id=base.id):
+        db.add(TipoSuspension(diccionario_id=dic.id, codigo_plame=s.codigo_plame, descripcion=s.descripcion,
+                              tipo=s.tipo, concepto_codigo=s.concepto_codigo))
+    db.flush()
+    return dic
+
+
 def sembrar_mype(db: Session) -> None:
     """Crea (o completa, sin duplicar) los Diccionarios MYPE a partir del RG_728 v1. Idempotente."""
     base = db.query(Diccionario).filter_by(codigo="RG_728", version=1).first()
@@ -216,27 +242,7 @@ def sembrar_mype(db: Session) -> None:
             dic = db.query(Diccionario).filter_by(codigo=cod, version=ver).first()
             if not dic:
                 etiqueta = "D.S. 013-2013-PRODUCE" if ver == 1 else "Ley 32353"
-                dic = Diccionario(codigo=cod, nombre=f"{nombre} ({etiqueta})", version=ver, vigente_desde=DESDE)
-                db.add(dic)
-                db.flush()
-                for p in db.query(DiccionarioParametro).filter_by(diccionario_id=base.id):
-                    db.add(DiccionarioParametro(diccionario_id=dic.id, clave=p.clave, valor=p.valor, vigente_desde=p.vigente_desde,
-                                                vigente_hasta=p.vigente_hasta, nota=p.nota))
-                for a in db.query(DiccionarioAFP).filter_by(diccionario_id=base.id):
-                    db.add(DiccionarioAFP(diccionario_id=dic.id, nombre=a.nombre, aporte=a.aporte, comision=a.comision, prima=a.prima,
-                                          comision_mixta_flujo=a.comision_mixta_flujo, comision_saldo=a.comision_saldo,
-                                          tope_prima=a.tope_prima, vigente_desde=a.vigente_desde, vigente_hasta=a.vigente_hasta))
-                for e in db.query(DiccionarioEscala5ta).filter_by(diccionario_id=base.id):
-                    db.add(DiccionarioEscala5ta(diccionario_id=dic.id, desde_uit=e.desde_uit, hasta_uit=e.hasta_uit, tasa=e.tasa))
-                for c in db.query(Concepto).filter_by(diccionario_id=base.id):
-                    db.add(Concepto(diccionario_id=dic.id, codigo=c.codigo, descripcion=c.descripcion, categoria=c.categoria,
-                                    naturaleza=c.naturaleza, calculado=c.calculado, afecta_afp_onp=c.afecta_afp_onp,
-                                    afecta_5ta_regular=c.afecta_5ta_regular, afecta_5ta_directa=c.afecta_5ta_directa,
-                                    afecta_essalud=c.afecta_essalud, codigo_plame=c.codigo_plame))
-                for s in db.query(TipoSuspension).filter_by(diccionario_id=base.id):
-                    db.add(TipoSuspension(diccionario_id=dic.id, codigo_plame=s.codigo_plame, descripcion=s.descripcion,
-                                          tipo=s.tipo, concepto_codigo=s.concepto_codigo))
-                db.flush()
+                dic = _clonar(db, base, cod, f"{nombre} ({etiqueta})", ver)
             claves = {p.clave: p for p in db.query(DiccionarioParametro).filter_by(diccionario_id=dic.id)}
             for clave, (valor, nota) in MYPE_PARAMETROS[cod].items():
                 if clave in claves:
@@ -247,4 +253,27 @@ def sembrar_mype(db: Session) -> None:
                 c = CONCEPTO_SIS
                 db.add(Concepto(diccionario_id=dic.id, codigo=c[0], descripcion=c[1], categoria=c[2], naturaleza=c[3], calculado=c[4],
                                 afecta_afp_onp=False, afecta_5ta_regular=False, afecta_5ta_directa=False, afecta_essalud=False, codigo_plame=None))
+    db.commit()
+
+
+def sembrar_cc(db: Session) -> None:
+    """Diccionario CONSTRUCCION_CIVIL v1: valores de la RM 197-2025-TR (vigente del 01.01.2026 al 31.12.2026). Idempotente."""
+    from .cc import CONCEPTOS_CC, VALORES_CONVENIO
+    base = db.query(Diccionario).filter_by(codigo="RG_728", version=1).first()
+    if not base:
+        return
+    dic = db.query(Diccionario).filter_by(codigo="CONSTRUCCION_CIVIL", version=1).first()
+    if not dic:
+        dic = _clonar(db, base, "CONSTRUCCION_CIVIL", "Construcción Civil (RM 197-2025-TR)", 1)
+    claves = {p.clave for p in db.query(DiccionarioParametro).filter_by(diccionario_id=dic.id)}
+    for clave, (valor, _etq, _grp) in VALORES_CONVENIO.items():
+        if clave not in claves:
+            db.add(DiccionarioParametro(diccionario_id=dic.id, clave=clave, valor=Decimal(valor), vigente_desde=DESDE,
+                                        nota="RM 197-2025-TR (convenio 2026)"))
+    codigos = {c.codigo for c in db.query(Concepto).filter_by(diccionario_id=dic.id)}
+    for cod, desc, cat, nat, calc, afp, r5, ess, plame in CONCEPTOS_CC:
+        if cod not in codigos:
+            db.add(Concepto(diccionario_id=dic.id, codigo=cod, descripcion=desc, categoria=cat, naturaleza=nat, calculado=calc,
+                            afecta_afp_onp=bool(afp), afecta_5ta_regular=bool(r5), afecta_5ta_directa=False,
+                            afecta_essalud=bool(ess), codigo_plame=plame))
     db.commit()

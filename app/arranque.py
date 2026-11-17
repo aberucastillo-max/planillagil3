@@ -6,7 +6,7 @@ from sqlalchemy import inspect, text
 
 from .db import SessionLocal, engine
 from .models import Base
-from .seed import sembrar_mype, sembrar_rg728
+from .seed import sembrar_cc, sembrar_mype, sembrar_rg728
 
 log = logging.getLogger("planilla")
 SQL_INTEGRIDAD = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sql", "integridad_postgres.sql")
@@ -41,10 +41,13 @@ def preparar_base():
                               ("norma_mype", "VARCHAR(12) NOT NULL DEFAULT 'DS_013_2013'"), ("salud_micro", "VARCHAR(8) NOT NULL DEFAULT 'ESSALUD'"),
                               ("asig_fam_mype", "BOOLEAN NOT NULL DEFAULT TRUE")):
                 c.execute(text(f"ALTER TABLE empresas ADD COLUMN IF NOT EXISTS {col} {tipo}"))
+            c.execute(text("ALTER TABLE empresas ADD COLUMN IF NOT EXISTS cc_beneficios_semanales BOOLEAN NOT NULL DEFAULT TRUE"))
+            c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_obrero VARCHAR(30)"))
     db = SessionLocal()
     try:
         sembrar_rg728(db)
         sembrar_mype(db)
+        sembrar_cc(db)
         # Desde la etapa 4 la liquidación NO se guarda como borrador: solo existe cerrada. Se limpian los borradores antiguos.
         if "liquidaciones" in set(inspect(engine).get_table_names()):
             ids = [r[0] for r in db.execute(text("SELECT id FROM liquidaciones WHERE estado = 'ABIERTA'"))]

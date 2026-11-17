@@ -148,6 +148,9 @@ def recalcular_quincena(db: Session, periodo: Periodo) -> dict:
 def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
     if periodo.fase == FASE_QUINCENA:
         return recalcular_quincena(db, periodo)
+    if periodo.fase.startswith("Semana"):
+        from .calculo_cc import recalcular_semana          # import local: calculo_cc importa este módulo
+        return recalcular_semana(db, periodo)
     exigir_abierto(periodo)
     dic = db.get(Diccionario, periodo.diccionario_id)
     empresa = db.get(Empresa, periodo.empresa_id)
