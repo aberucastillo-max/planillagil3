@@ -26,6 +26,14 @@ def exigir_abierto(periodo: Periodo):
         raise ErrorDeNegocio("Error: El periodo está CERRADO. La información histórica es inmutable.", 403)
 
 
+def af_aplica(db: Session, emp: Empleado) -> bool:
+    """El trabajador cobra asignación familiar: su marca y, en empresas MYPE, que la empresa la tenga activada."""
+    if not emp.asignacion_familiar:
+        return False
+    e = db.get(Empresa, emp.empresa_id)
+    return e is None or e.regimen_codigo == "RG_728" or bool(e.asig_fam_mype)
+
+
 def sueldo_a_fecha(db: Session, empleado_id: int, fecha: date) -> Optional[Decimal]:
     s = (db.query(Sueldo).filter(Sueldo.empleado_id == empleado_id, Sueldo.fecha_vigencia <= fecha)
          .order_by(Sueldo.fecha_vigencia.desc()).first())
@@ -142,6 +150,7 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
         return recalcular_quincena(db, periodo)
     exigir_abierto(periodo)
     dic = db.get(Diccionario, periodo.diccionario_id)
+    empresa = db.get(Empresa, periodo.empresa_id)
     pr: ParametrosPeriodo = cargar_parametros(db, periodo.diccionario_id, periodo.fecha_inicio, empresa_id=periodo.empresa_id, periodo_id=periodo.id)
     fi, ff = periodo.fecha_inicio, periodo.fecha_fin
     base = int(pr["BASE_DIAS"])
@@ -246,7 +255,7 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
 
         # ---- ingresos calculados
         add("@HABER_BASICO", sueldo / base * dias_trab, f"{sueldo} / {base} x {dias_trab} días")
-        af_mensual = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if emp.asignacion_familiar else CERO
+        af_mensual = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if af_aplica(db, emp) else CERO
         if af_mensual and (dias_trab + dias_vac) > 0:
             add("@ASIGNACION_FAMILIAR", af_mensual / base * (dias_trab + dias_vac),
                 f"{af_mensual} / {base} x {dias_trab + dias_vac} días (10 % RMV)")
@@ -329,10 +338,14 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
 
         # ---- aportes del empleador (siempre separados)
         rmv_min = R.rmv_minima_essalud(pr["RMV"], subs)          # mínimo = RMV, prorrateado por días de subsidio
-        ess, aeps = R.calcular_essalud(base_ess, rmv_min, pr["ESSALUD_TASA"], pr["CREDITO_EPS_TASA"],
-                                       emp.cobertura_eps)
-        add("@ESSALUD", ess, f"base {base_ess} (mín. {rmv_min})")
-        add("@APORTE_EPS", aeps, "Crédito EPS")
+        if empresa.regimen_codigo == "MYPE_MICRO" and empresa.salud_micro == "SIS" and "SIS_MONTO" in pr.p:
+            if base_ess > 0:
+                add("@SIS", pr["SIS_MONTO"], "SIS Microempresas: aporte mensual del empleador (el Estado subsidia el otro 50 %)")
+        else:
+            ess, aeps = R.calcular_essalud(base_ess, rmv_min, pr["ESSALUD_TASA"], pr["CREDITO_EPS_TASA"],
+                                           emp.cobertura_eps)
+            add("@ESSALUD", ess, f"base {base_ess} (mín. {rmv_min})")
+            add("@APORTE_EPS", aeps, "Crédito EPS")
 
         # ---- totales
         ingresos = sum((f["monto"] for f in filas if f["categoria"] == "INGRESO"), CERO)

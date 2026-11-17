@@ -6,7 +6,7 @@ import argparse
 from .db import SessionLocal, engine
 from .models import Base, Cuenta
 from .security import generar_api_key, hash_key
-from .seed import sembrar_rg728
+from .seed import sembrar_mype, sembrar_rg728
 
 PLANES = {"GRATIS": (1, 10), "FREELANCER": (20, 10)}   # (max_empresas, max_trabajadores por empresa) - ajustables
 
@@ -16,6 +16,7 @@ def init_db():
     db = SessionLocal()
     try:
         sembrar_rg728(db)
+        sembrar_mype(db)
     finally:
         db.close()
     print("Tablas creadas y Diccionario RG_728 v1 sembrado.")

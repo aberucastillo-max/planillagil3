@@ -327,7 +327,7 @@ def aplicar(db, empresa, ops: list) -> dict:
                              documento_identidad=d["documento_identidad"], puesto=d["puesto"], sede=d["sede"], fecha_ingreso=d["fecha_ingreso"],
                              sistema_pensionario=d["sistema_pensionario"], afp_nombre=d["afp_nombre"], cuspp=d["cuspp"], banco=d["banco"],
                              numero_cuenta=d["numero_cuenta"], asignacion_familiar=d["asignacion_familiar"], cobertura_eps=d["cobertura_eps"],
-                             regimen_codigo="RG_728", tipo_contrato=d["tipo_contrato"], fecha_fin_contrato=d["fecha_fin_contrato"], area=d["area"],
+                             regimen_codigo=empresa.regimen_codigo, tipo_contrato=d["tipo_contrato"], fecha_fin_contrato=d["fecha_fin_contrato"], area=d["area"],
                              centro_costo=d["centro_costo"], categoria=d["categoria"], calificacion=d["calificacion"], tipo_comision=d["tipo_comision"])
                 db.add(e); db.flush()
                 db.add(Sueldo(empleado_id=e.id, monto=d["sueldo"], fecha_vigencia=d["fecha_ingreso"], motivo="Sueldo inicial de contrato"))

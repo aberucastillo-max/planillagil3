@@ -47,6 +47,11 @@ class Empresa(Base):
     quincena_modo = Column(String(12), nullable=False, default="PORCENTAJE")    # PORCENTAJE del sueldo | MONTO fijo por colaborador
     quincena_valor = Column(Numeric(12, 2), nullable=False, default=50)         # 50 = 50 % del sueldo (o monto en S/ si el modo es MONTO)
     diccionario_id = Column(Integer, ForeignKey("diccionarios.id"), nullable=False)
+    representante_dni = Column(String(15))
+    regimen_codigo = Column(String(30), nullable=False, default="RG_728")      # RG_728 | MYPE_MICRO | MYPE_PEQUENA (se define al registrar la empresa)
+    norma_mype = Column(String(12), nullable=False, default="DS_013_2013")      # DS_013_2013 | LEY_32353 (solo MYPE)
+    salud_micro = Column(String(8), nullable=False, default="ESSALUD")          # SIS | ESSALUD (solo microempresa)
+    asig_fam_mype = Column(Boolean, nullable=False, default=True)               # la empresa MYPE paga asignación familiar
     creado_en = Column(DateTime(timezone=True), default=_now)
     __table_args__ = (UniqueConstraint("cuenta_id", "ruc", name="uq_empresa_cuenta_ruc"),)
 

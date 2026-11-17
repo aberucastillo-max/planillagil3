@@ -15,7 +15,7 @@ from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from . import reglas as R
-from .calculo import D, FASE_QUINCENA, ids_vigentes, periodo_vigente, periodos_vigentes, sueldo_a_fecha
+from .calculo import D, af_aplica, FASE_QUINCENA, ids_vigentes, periodo_vigente, periodos_vigentes, sueldo_a_fecha
 from .diccionario import CLAVES_LIQUIDACION, ErrorDeNegocio, cargar_parametros
 from .models import (Auditoria, CtsDeposito, Detalle, Empleado, Liquidacion, LiquidacionDetalle, LiquidacionManual, Periodo,
                      RentaPrevia5ta, Resultado, Vacacion)
@@ -207,7 +207,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     sueldo = sueldo_a_fecha(db, emp.id, cese)
     if sueldo is None:
         raise ErrorDeNegocio("El colaborador no tiene sueldo vigente a la fecha de cese.", 422)
-    af = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if emp.asignacion_familiar else CERO
+    af = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if af_aplica(db, emp) else CERO
     variables = _promedio_variables(db, emp, periodo.empresa_id, periodo.anio * 12 + periodo.mes, pr)
     rc = sueldo + af + variables                                   # remuneración computable (sin 1/6 de gratificación)
     filas = out.filas
@@ -234,7 +234,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     grat_info = None
     if ya_pagada:
         avisos.append("La gratificación del semestre ya figura pagada en planilla: no se calcula la trunca.")
-    elif meses_g > 0:
+    elif meses_g > 0 and pr.p.get("GRATI_APLICA", Decimal(1)) != 0:
         grat = R.gratificacion_trunca(rc, meses_g, pr["GRATI_DIVISOR"])
         add("@GRATIFICACION", grat, f"{rc} / {pr['GRATI_DIVISOR']:.0f} × {meses_g} meses completos del semestre")
         pct = pr["BONIF_EXTRA_EPS_PCT"] if emp.cobertura_eps else pr["BONIF_EXTRA_PCT"]
@@ -251,7 +251,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     y, m, d = R.tiempo_servicio(c_desde, cese)
     meses_c, dias_c = y * 12 + m, d
     cts_info = None
-    if meses_c or dias_c:
+    if (meses_c or dias_c) and pr.p.get("CTS_APLICA", Decimal(1)) != 0:
         por_mes, por_dia = R.cts_monto(rc_cts, meses_c, dias_c, pr["CTS_DIVISOR_MES"], pr["CTS_DIVISOR_DIA"])
         add("@CTS_TRUNCA", por_mes + por_dia,
             f"({rc} + {sexto}) / {pr['CTS_DIVISOR_MES']:.0f} × {meses_c} meses + / {pr['CTS_DIVISOR_DIA']:.0f} × {dias_c} días")
@@ -286,26 +286,27 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
 
     # ---- vacaciones vencidas y truncas desde el saldo del módulo de Vacaciones
     ay, am, ad = R.tiempo_servicio(ing, cese)
+    VBASE = pr.p.get("VAC_BASE_PAGO", pr["VAC_DIAS_ANIO"])      # divisor del pago diario (30); los días por año (30 o 15) salen de VAC_DIAS_ANIO
     ganados = R.dias_vacaciones_ganados(ay, am, ad, pr["VAC_DIAS_ANIO"])
     usados = _dias_vacaciones_usados(db, emp)
     venc, trunc = R.vacaciones_pendientes(ganados, usados, ay, pr["VAC_DIAS_ANIO"])
     anio_aniv = cese.year if (cese.month, cese.day) >= (ing.month, ing.day) else cese.year - 1
     per_trunca, per_venc = f"{anio_aniv}-{anio_aniv + 1}", f"{anio_aniv - 1}-{anio_aniv}"
-    pago_f = R.pago_vacaciones(rc, venc, pr["VAC_DIAS_ANIO"]) if venc > 0 else CERO
+    pago_f = R.pago_vacaciones(rc, venc, VBASE) if venc > 0 else CERO
     venc_f, venc_mostrado, monto_venc = venc, venc, pago_f
-    formula_v = f"{rc} / {pr['VAC_DIAS_ANIO']:.0f} × {venc_f:.4f} días (de años completos sin gozar)"
+    formula_v = f"{rc} / {VBASE:.0f} × {venc_f:.4f} días (de años completos sin gozar)"
     if vac_modo == "CERO":
         venc_mostrado, monto_venc = CERO, CERO
         if venc_f > 0:
             avisos.append(f"Vacaciones pendientes deshabilitadas: no se pagan (por fórmula serían {venc_f:.4f} días = S/ {pago_f}).")
     elif vac_modo == "DIAS":
         venc_mostrado = Decimal(str(vac_valor))
-        monto_venc = R.pago_vacaciones(rc, venc_mostrado, pr["VAC_DIAS_ANIO"])
-        formula_v = f"{rc} / {pr['VAC_DIAS_ANIO']:.0f} × {venc_mostrado:.4f} días ESCRITOS manualmente (por fórmula: {venc_f:.4f} días)"
+        monto_venc = R.pago_vacaciones(rc, venc_mostrado, VBASE)
+        formula_v = f"{rc} / {VBASE:.0f} × {venc_mostrado:.4f} días ESCRITOS manualmente (por fórmula: {venc_f:.4f} días)"
         avisos.append(f"Vacaciones pendientes: días escritos manualmente ({venc_mostrado:.4f}); por fórmula serían {venc_f:.4f} días = S/ {pago_f}.")
     elif vac_modo == "MONTO":
         monto_venc = R.q2(Decimal(str(vac_valor)))
-        venc_mostrado = (monto_venc * pr["VAC_DIAS_ANIO"] / rc) if rc > 0 else CERO
+        venc_mostrado = (monto_venc * VBASE / rc) if rc > 0 else CERO
         formula_v = f"Monto ESCRITO manualmente S/ {monto_venc} (por fórmula: S/ {pago_f})"
         avisos.append(f"Vacaciones pendientes: monto escrito manualmente (S/ {monto_venc}); por fórmula serían S/ {pago_f}.")
     if venc_f > 0:
@@ -314,8 +315,8 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
         add("@VACACIONES_VENCIDAS", monto_venc, formula_v)
     venc = venc_mostrado
     if trunc > 0:
-        add("@VACACIONES_TRUNCAS", R.pago_vacaciones(rc, trunc, pr["VAC_DIAS_ANIO"]),
-            f"{rc} / {pr['VAC_DIAS_ANIO']:.0f} × {trunc:.4f} días del año en curso")
+        add("@VACACIONES_TRUNCAS", R.pago_vacaciones(rc, trunc, VBASE),
+            f"{rc} / {VBASE:.0f} × {trunc:.4f} días del año en curso")
 
     # ---- indemnización por despido arbitrario
     if emp.motivo_cese == MOTIVO_DESPIDO:

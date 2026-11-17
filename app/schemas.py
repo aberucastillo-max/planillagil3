@@ -10,7 +10,12 @@ MONEY = re.compile(r"^-?\d+(\.\d{1,2})?$")
 class EmpresaIn(BaseModel):
     ruc: str = Field(pattern=r"^\d{11}$")
     razon_social: str = Field(min_length=2, max_length=255)
-    diccionario_codigo: str = "RG_728"
+    diccionario_codigo: str = "RG_728"      # compatibilidad: igual a «regimen»
+    regimen: Optional[str] = None            # RG_728 | MYPE_MICRO | MYPE_PEQUENA
+    norma_mype: str = Field(default="DS_013_2013", pattern="^(DS_013_2013|LEY_32353)$")
+    salud_micro: str = Field(default="ESSALUD", pattern="^(SIS|ESSALUD)$")
+    asig_fam_mype: bool = True
+    representante_dni: Optional[str] = Field(default=None, pattern=r"^\d{8}$")
     cuenta_id: Optional[int] = None        # solo lo usa el administrador, para elegir la cuenta dueña
     direccion_fiscal: Optional[str] = None
     representante_legal: Optional[str] = None
@@ -197,6 +202,10 @@ class LiquidacionCerrarIn(BaseModel):
 
 
 class EmpresaPatch(BaseModel):
+    representante_dni: Optional[str] = Field(default=None, pattern=r"^\d{8}$")
+    norma_mype: Optional[str] = Field(default=None, pattern="^(DS_013_2013|LEY_32353)$")
+    salud_micro: Optional[str] = Field(default=None, pattern="^(SIS|ESSALUD)$")
+    asig_fam_mype: Optional[bool] = None
     razon_social: Optional[str] = Field(default=None, min_length=2, max_length=255)
     direccion_fiscal: Optional[str] = None
     representante_legal: Optional[str] = None

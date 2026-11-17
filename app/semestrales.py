@@ -7,7 +7,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from . import reglas as R
-from .calculo import D, sueldo_a_fecha
+from .calculo import D, af_aplica, sueldo_a_fecha
 from .diccionario import CLAVES_LIQUIDACION, ErrorDeNegocio, cargar_parametros
 from .liquidacion import _promedio_variables, _ultima_gratificacion
 from .models import Auditoria, CtsDeposito, Empleado, Empresa, Periodo
@@ -24,7 +24,7 @@ def semestre_de_pago(mes_pago: int):
 def gratificacion_automatica(db: Session, emp: Empleado, periodo: Periodo, pr) -> Optional[dict]:
     """Gratificación y bonificación extraordinaria del semestre para la boleta del mes de pago. None si no corresponde."""
     sem = semestre_de_pago(periodo.mes)
-    if sem is None or periodo.fase != "Fin de Mes" or pr.p.get("GRATIFICACION_AUTOMATICA", Decimal(1)) == 0:
+    if sem is None or periodo.fase != "Fin de Mes" or pr.p.get("GRATIFICACION_AUTOMATICA", Decimal(1)) == 0 or pr.p.get("GRATI_APLICA", Decimal(1)) == 0:
         return None
     m_ini, m_fin = sem
     s_ini = date(periodo.anio, m_ini, 1)
@@ -37,7 +37,7 @@ def gratificacion_automatica(db: Session, emp: Empleado, periodo: Periodo, pr) -
     sueldo = sueldo_a_fecha(db, emp.id, max(corte, emp.fecha_ingreso))
     if sueldo is None:
         return None
-    af = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if emp.asignacion_familiar else CERO
+    af = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if af_aplica(db, emp) else CERO
     variables = _promedio_variables(db, emp, periodo.empresa_id, periodo.anio * 12 + periodo.mes, pr)
     rc = sueldo + af + variables
     grat = R.gratificacion_trunca(rc, meses, pr["GRATI_DIVISOR"])
@@ -79,6 +79,8 @@ def calcular_cts(db: Session, empresa: Empresa, anio: int, codigo: str) -> dict:
     """Calcula (o recalcula) la CTS del semestre de los colaboradores vigentes al último día del semestre.
     Los ya DEPOSITADOS no se tocan. Los cesados antes del corte se liquidan con su liquidación por cese."""
     ini, fin = semestre_cts(anio, codigo)
+    if cargar_parametros(db, empresa.diccionario_id, fin, empresa_id=empresa.id).p.get("CTS_APLICA", Decimal(1)) == 0:
+        raise ErrorDeNegocio("Esta empresa (microempresa MYPE) no paga CTS.", 409)
     pmes = db.query(Periodo).filter(Periodo.empresa_id == empresa.id, Periodo.anio == fin.year, Periodo.mes == fin.month, Periodo.fase == "Fin de Mes").first()
     pr = cargar_parametros(db, empresa.diccionario_id, fin, empresa_id=empresa.id, extra=CLAVES_LIQUIDACION, periodo_id=pmes.id if pmes else None)
     avisos: List[str] = []
@@ -98,7 +100,7 @@ def calcular_cts(db: Session, empresa: Empresa, anio: int, codigo: str) -> dict:
         meses, dias = y * 12 + m, d
         if meses == 0 and dias == 0:
             continue
-        af = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if emp.asignacion_familiar else CERO
+        af = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if af_aplica(db, emp) else CERO
         variables = _promedio_variables(db, emp, empresa.id, fin.year * 12 + fin.month + 1, pr)
         sexto = R.q2(_ultima_gratificacion(db, emp, empresa.id, fin) / 6)
         if sexto == 0:

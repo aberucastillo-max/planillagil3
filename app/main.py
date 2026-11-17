@@ -142,7 +142,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-17-f14"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-17-f15"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -164,6 +164,8 @@ def listar_empresas(acceso: Acceso = Depends(get_acceso), db: Session = Depends(
              "direccion_fiscal": e.direccion_fiscal, "representante_legal": e.representante_legal,
              "cargo_representante": e.cargo_representante, "usa_quincena": bool(e.usa_quincena),
              "quincena_modo": e.quincena_modo, "quincena_valor": e.quincena_valor,
+             "representante_dni": e.representante_dni, "regimen": e.regimen_codigo, "regimen_nombre": planes.REGIMENES.get(e.regimen_codigo),
+             "norma_mype": e.norma_mype, "salud_micro": e.salud_micro, "asig_fam_mype": bool(e.asig_fam_mype),
              "limite_trabajadores": cuentas[e.cuenta_id].max_trabajadores, "cuenta_id": e.cuenta_id,
              "cuenta": cuentas[e.cuenta_id].nombre if acceso.admin else None}
             for e in q.order_by(Empresa.razon_social)]
@@ -183,14 +185,19 @@ def crear_empresa(data: EmpresaIn, acceso: Acceso = Depends(get_acceso), db: Ses
         raise HTTPException(403, f"El plan {cuenta.plan} de esa cuenta permite {cuenta.max_empresas} empresa(s).")
     if db.query(Empresa).filter(Empresa.cuenta_id == cuenta.id, Empresa.ruc == data.ruc).first():
         raise HTTPException(409, "Ese RUC ya está registrado en la cuenta.")
-    dic = (db.query(Diccionario).filter(Diccionario.codigo == data.diccionario_codigo, Diccionario.estado == "ACTIVO")
-           .order_by(Diccionario.version.desc()).first())
+    regimen = data.regimen or data.diccionario_codigo
+    planes.exigir_regimen(db, None if acceso.admin else cuenta.plan, regimen)
+    ver = planes.version_dic(regimen, data.norma_mype)
+    q = db.query(Diccionario).filter(Diccionario.codigo == regimen, Diccionario.estado == "ACTIVO")
+    dic = q.filter(Diccionario.version == ver).first() if ver else q.order_by(Diccionario.version.desc()).first()
     if not dic:
-        raise HTTPException(422, f"Diccionario {data.diccionario_codigo} no existe.")
+        raise HTTPException(422, f"Diccionario {regimen} no existe.")
     e = Empresa(cuenta_id=cuenta.id, ruc=data.ruc, razon_social=data.razon_social.upper(), diccionario_id=dic.id,
                 direccion_fiscal=data.direccion_fiscal, representante_legal=data.representante_legal,
                 cargo_representante=data.cargo_representante, usa_quincena=data.usa_quincena,
-                quincena_modo=data.quincena_modo, quincena_valor=Decimal(str(data.quincena_valor)))
+                quincena_modo=data.quincena_modo, quincena_valor=Decimal(str(data.quincena_valor)),
+                representante_dni=data.representante_dni, regimen_codigo=regimen, norma_mype=data.norma_mype,
+                salud_micro=data.salud_micro, asig_fam_mype=data.asig_fam_mype)
     db.add(e)
     if acceso.admin:
         db.add(Auditoria(cuenta_id=cuenta.id, accion="ADMIN_CREA_EMPRESA", detalle=f"RUC {data.ruc}"))
@@ -198,10 +205,24 @@ def crear_empresa(data: EmpresaIn, acceso: Acceso = Depends(get_acceso), db: Ses
     return {"id": e.id, "ruc": e.ruc, "razon_social": e.razon_social, "cuenta_id": cuenta.id}
 
 
+@app.get(API + "/mype/advertencias")
+def advertencias_mype(acceso: Acceso = Depends(get_acceso)):
+    """Textos cortos que la pantalla muestra al elegir norma, salud y asignación familiar de una empresa MYPE."""
+    return planes.ADVERTENCIAS
+
+
 @app.patch(API + "/empresas/{empresa_id}")
 def actualizar_empresa(data: EmpresaPatch, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """Datos de la empresa que salen en boletas y liquidaciones (razón social, dirección, representante)."""
     cambios = data.model_dump(exclude_unset=True)
+    nueva_norma = cambios.pop("norma_mype", None)
+    if nueva_norma and empresa.regimen_codigo != "RG_728" and nueva_norma != empresa.norma_mype:
+        if db.query(Periodo).filter(Periodo.empresa_id == empresa.id).count():
+            raise HTTPException(409, "La norma no se puede cambiar cuando la empresa ya tiene periodos. Cree otra empresa o consulte soporte.")
+        dic = db.query(Diccionario).filter_by(codigo=empresa.regimen_codigo, version=planes.version_dic(empresa.regimen_codigo, nueva_norma), estado="ACTIVO").first()
+        if not dic:
+            raise HTTPException(422, "Esa norma aún no está cargada.")
+        empresa.norma_mype, empresa.diccionario_id = nueva_norma, dic.id
     for campo, valor in cambios.items():
         if campo == "quincena_valor" and valor is not None:
             valor = Decimal(str(valor))
@@ -316,14 +337,15 @@ def crear_empleado(data: EmpleadoIn, empresa: Empresa = Depends(empresa_actual),
         nombres = {a.nombre.upper() for a in db.query(DiccionarioAFP).filter(DiccionarioAFP.diccionario_id == empresa.diccionario_id)}
         if data.afp_nombre.upper() not in nombres:
             raise HTTPException(422, f"AFP no reconocida. Opciones: {', '.join(sorted(nombres))}")
-    planes.exigir_regimen(db, db.get(Cuenta, empresa.cuenta_id).plan, data.regimen)
+    regimen_emp = empresa.regimen_codigo if empresa.regimen_codigo != "RG_728" else data.regimen
+    planes.exigir_regimen(db, db.get(Cuenta, empresa.cuenta_id).plan, regimen_emp)
     e = Empleado(empresa_id=empresa.id, nombres=data.nombres.upper(), apellidos=data.apellidos.upper(),
                  tipo_documento=data.tipo_documento, documento_identidad=data.documento_identidad,
                  puesto=(data.puesto or "").upper() or None, sede=data.sede, fecha_ingreso=data.fecha_ingreso,
                  sistema_pensionario=data.sistema_pensionario,
                  afp_nombre=data.afp_nombre.upper() if data.afp_nombre else None, cuspp=data.cuspp,
                  banco=data.banco, numero_cuenta=data.numero_cuenta, asignacion_familiar=data.asignacion_familiar,
-                 cobertura_eps=data.cobertura_eps, regimen_codigo=data.regimen, tipo_contrato=data.tipo_contrato,
+                 cobertura_eps=data.cobertura_eps, regimen_codigo=regimen_emp, tipo_contrato=data.tipo_contrato,
                  fecha_fin_contrato=data.fecha_fin_contrato, area=data.area, centro_costo=data.centro_costo,
                  categoria=data.categoria or "EMPLEADOS", calificacion=data.calificacion,
                  tipo_comision=data.tipo_comision if data.sistema_pensionario == "AFP" else "FLUJO")

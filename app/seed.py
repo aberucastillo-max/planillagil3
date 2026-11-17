@@ -181,3 +181,70 @@ def completar_rg728(db: Session) -> None:
                             calculado=calc, afecta_afp_onp=bool(afp), afecta_5ta_regular=bool(r5),
                             afecta_5ta_directa=bool(d5), afecta_essalud=bool(ess), codigo_plame=plame))
     db.commit()
+
+
+# ------------------------------------------------------------------ MYPE (microempresa y pequeña empresa)
+# Se copian las reglas del Régimen General y se sobrescribe lo propio de cada categoría. Versión 1 = D.S. 013-2013-PRODUCE (vigente);
+# versión 2 = Ley 32353 (entra en vigencia con su reglamento; mismos importes hasta validar el reglamento). TODO por validar con contador.
+MYPE_NORMAS = {"DS_013_2013": 1, "LEY_32353": 2}
+MYPE_NOMBRES = {"MYPE_MICRO": "MYPE · Microempresa", "MYPE_PEQUENA": "MYPE · Pequeña empresa"}
+MYPE_PARAMETROS = {   # clave -> (valor, nota)
+    "MYPE_MICRO": {
+        "GRATI_APLICA": ("0", "la microempresa no paga gratificaciones"), "GRATIFICACION_AUTOMATICA": ("0", "sin gratificación"),
+        "CTS_APLICA": ("0", "la microempresa no paga CTS"), "VAC_DIAS_ANIO": ("15", "15 días de vacaciones por año"),
+        "VAC_BASE_PAGO": ("30", "el día de vacaciones se paga con la remuneración / 30"),
+        "INDEM_FACTOR": ("0.333333", "10 remuneraciones diarias por año (10/30)"), "INDEM_TOPE": ("3", "tope 90 remuneraciones diarias (3 mensuales)"),
+        "SIS_MONTO": ("15", "aporte mensual del empleador al SIS (50 % del costo; el Estado paga el resto)"),
+    },
+    "MYPE_PEQUENA": {
+        "GRATI_DIVISOR": ("12", "media remuneración por semestre"), "CTS_DIVISOR_MES": ("24", "15 remuneraciones diarias por año"),
+        "CTS_DIVISOR_DIA": ("720", "15 remuneraciones diarias por año"), "VAC_DIAS_ANIO": ("15", "15 días de vacaciones por año"),
+        "VAC_BASE_PAGO": ("30", "el día de vacaciones se paga con la remuneración / 30"),
+        "INDEM_FACTOR": ("0.666667", "20 remuneraciones diarias por año (20/30)"), "INDEM_TOPE": ("4", "tope 120 remuneraciones diarias (4 mensuales)"),
+    },
+}
+CONCEPTO_SIS = ("@SIS", "Aporte SIS (empleador)", "APORTE", "FORMULA", True, 0, 0, 0, 0, None)
+
+
+def sembrar_mype(db: Session) -> None:
+    """Crea (o completa, sin duplicar) los Diccionarios MYPE a partir del RG_728 v1. Idempotente."""
+    base = db.query(Diccionario).filter_by(codigo="RG_728", version=1).first()
+    if not base:
+        return
+    for cod, nombre in MYPE_NOMBRES.items():
+        for norma, ver in MYPE_NORMAS.items():
+            dic = db.query(Diccionario).filter_by(codigo=cod, version=ver).first()
+            if not dic:
+                etiqueta = "D.S. 013-2013-PRODUCE" if ver == 1 else "Ley 32353"
+                dic = Diccionario(codigo=cod, nombre=f"{nombre} ({etiqueta})", version=ver, vigente_desde=DESDE)
+                db.add(dic)
+                db.flush()
+                for p in db.query(DiccionarioParametro).filter_by(diccionario_id=base.id):
+                    db.add(DiccionarioParametro(diccionario_id=dic.id, clave=p.clave, valor=p.valor, vigente_desde=p.vigente_desde,
+                                                vigente_hasta=p.vigente_hasta, nota=p.nota))
+                for a in db.query(DiccionarioAFP).filter_by(diccionario_id=base.id):
+                    db.add(DiccionarioAFP(diccionario_id=dic.id, nombre=a.nombre, aporte=a.aporte, comision=a.comision, prima=a.prima,
+                                          comision_mixta_flujo=a.comision_mixta_flujo, comision_saldo=a.comision_saldo,
+                                          tope_prima=a.tope_prima, vigente_desde=a.vigente_desde, vigente_hasta=a.vigente_hasta))
+                for e in db.query(DiccionarioEscala5ta).filter_by(diccionario_id=base.id):
+                    db.add(DiccionarioEscala5ta(diccionario_id=dic.id, desde_uit=e.desde_uit, hasta_uit=e.hasta_uit, tasa=e.tasa))
+                for c in db.query(Concepto).filter_by(diccionario_id=base.id):
+                    db.add(Concepto(diccionario_id=dic.id, codigo=c.codigo, descripcion=c.descripcion, categoria=c.categoria,
+                                    naturaleza=c.naturaleza, calculado=c.calculado, afecta_afp_onp=c.afecta_afp_onp,
+                                    afecta_5ta_regular=c.afecta_5ta_regular, afecta_5ta_directa=c.afecta_5ta_directa,
+                                    afecta_essalud=c.afecta_essalud, codigo_plame=c.codigo_plame))
+                for s in db.query(TipoSuspension).filter_by(diccionario_id=base.id):
+                    db.add(TipoSuspension(diccionario_id=dic.id, codigo_plame=s.codigo_plame, descripcion=s.descripcion,
+                                          tipo=s.tipo, concepto_codigo=s.concepto_codigo))
+                db.flush()
+            claves = {p.clave: p for p in db.query(DiccionarioParametro).filter_by(diccionario_id=dic.id)}
+            for clave, (valor, nota) in MYPE_PARAMETROS[cod].items():
+                if clave in claves:
+                    claves[clave].valor, claves[clave].nota = Decimal(valor), nota
+                else:
+                    db.add(DiccionarioParametro(diccionario_id=dic.id, clave=clave, valor=Decimal(valor), vigente_desde=DESDE, nota=nota))
+            if not db.query(Concepto).filter_by(diccionario_id=dic.id, codigo="@SIS").first():
+                c = CONCEPTO_SIS
+                db.add(Concepto(diccionario_id=dic.id, codigo=c[0], descripcion=c[1], categoria=c[2], naturaleza=c[3], calculado=c[4],
+                                afecta_afp_onp=False, afecta_5ta_regular=False, afecta_5ta_directa=False, afecta_essalud=False, codigo_plame=None))
+    db.commit()
