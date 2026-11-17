@@ -52,6 +52,8 @@ def _tiempo_texto(a: int, m: int, d: int) -> str:
 def listar(db: Session, periodo: Periodo, estado: Optional[str] = None) -> List[dict]:
     """Cesados del periodo + pendientes de meses anteriores. Estados visibles: SIN_CERRAR y CERRADA."""
     filas: List[dict] = []
+    if db.get(Empresa, periodo.empresa_id).regimen_codigo == "CONSTRUCCION_CIVIL":
+        return filas                                       # obreros de construcción civil: todo se paga en la boleta semanal
     base = db.query(Empleado).filter(Empleado.empresa_id == periodo.empresa_id, Empleado.fecha_cese.isnot(None))
     for emp in base.order_by(Empleado.fecha_cese.desc(), Empleado.apellidos):
         en_mes = periodo.fecha_inicio <= emp.fecha_cese <= periodo.fecha_fin
@@ -174,6 +176,8 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     Opciones (en tiempo real, no se guardan salvo las de vacaciones y la CTS al cerrar):
       vac_modo   FORMULA (saldo del módulo Vacaciones) | CERO (no pagar pendientes) | DIAS (días escritos) | MONTO (monto escrito en S/)
       excluir    claves de conceptos deshabilitados para SIMULAR (no se puede cerrar así)."""
+    if db.get(Empresa, periodo.empresa_id).regimen_codigo == "CONSTRUCCION_CIVIL":
+        raise ErrorDeNegocio("Construcción Civil no tiene liquidación por cese: indemnización, vacaciones y gratificación se pagan cada semana en la boleta.", 409)
     periodo = periodo_vigente(db, periodo)
     if periodo.fase == FASE_QUINCENA:
         raise ErrorDeNegocio("La liquidación se apoya en la planilla de fin de mes del mes del cese: procésela primero (la quincena es solo un adelanto).", 409)

@@ -143,7 +143,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-17-f17"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-17-f18"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -277,7 +277,7 @@ def admin_editar_cuenta(cuenta_id: int, data: CuentaPatch, _: Acceso = Depends(e
 def listar_empleados(empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     hoy = date.today()
     return [{"id": e.id, "nombre": f"{e.apellidos}, {e.nombres}", "documento": e.documento_identidad,
-             "puesto": e.puesto, "sede": e.sede, "regimen": e.regimen_codigo, "tipo_obrero": e.tipo_obrero, "hijos": e.hijos, "centro_costo": e.centro_costo,
+             "puesto": e.puesto, "sede": e.sede, "regimen": e.regimen_codigo, "tipo_obrero": e.tipo_obrero, "hijos": e.hijos, "movilidad": e.movilidad, "centro_costo": e.centro_costo,
              "sistema_pensionario": e.sistema_pensionario, "afp": e.afp_nombre, "cuspp": e.cuspp,
              "banco": e.banco, "cuenta": e.numero_cuenta, "estado": e.estado,
              "asignacion_familiar": e.asignacion_familiar, "cobertura_eps": e.cobertura_eps,
@@ -356,7 +356,7 @@ def crear_empleado(data: EmpleadoIn, empresa: Empresa = Depends(empresa_actual),
                  sistema_pensionario=data.sistema_pensionario,
                  afp_nombre=data.afp_nombre.upper() if data.afp_nombre else None, cuspp=data.cuspp,
                  banco=data.banco, numero_cuenta=data.numero_cuenta, asignacion_familiar=data.asignacion_familiar,
-                 cobertura_eps=data.cobertura_eps, regimen_codigo=regimen_emp, tipo_obrero=data.tipo_obrero if es_cc else None, hijos=data.hijos, tipo_contrato=data.tipo_contrato,
+                 cobertura_eps=data.cobertura_eps, regimen_codigo=regimen_emp, tipo_obrero=data.tipo_obrero if es_cc else None, hijos=data.hijos, movilidad=data.movilidad, tipo_contrato=data.tipo_contrato,
                  fecha_fin_contrato=data.fecha_fin_contrato, area=data.area, centro_costo=data.centro_costo,
                  categoria=("OBREROS" if es_cc and not data.categoria else data.categoria) or "EMPLEADOS", calificacion=data.calificacion,
                  tipo_comision=data.tipo_comision if data.sistema_pensionario == "AFP" else "FLUJO")

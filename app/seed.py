@@ -266,12 +266,22 @@ def sembrar_cc(db: Session) -> None:
     if not dic:
         dic = _clonar(db, base, "CONSTRUCCION_CIVIL", "Construcción Civil (RM 197-2025-TR)", 1)
     claves = {p.clave for p in db.query(DiccionarioParametro).filter_by(diccionario_id=dic.id)}
+    for p in db.query(DiccionarioParametro).filter(DiccionarioParametro.diccionario_id == dic.id, DiccionarioParametro.clave.in_(("ALTURA_PCT", "NOCTURNA_PCT"))):
+        if p.valor == 0:                                                           # f17 los sembró en 0; f18 trae 8 % (altura 2026) y 20 % (nocturna)
+            p.valor = Decimal(VALORES_CONVENIO[p.clave][0])
     for clave, (valor, _etq, _grp) in VALORES_CONVENIO.items():
         if clave not in claves:
             db.add(DiccionarioParametro(diccionario_id=dic.id, clave=clave, valor=Decimal(valor), vigente_desde=DESDE,
                                         nota="RM 197-2025-TR (convenio 2026)"))
-    codigos = {c.codigo for c in db.query(Concepto).filter_by(diccionario_id=dic.id)}
+    existentes = {c.codigo: c for c in db.query(Concepto).filter_by(diccionario_id=dic.id)}
+    codigos = set(existentes)
     for cod, desc, cat, nat, calc, afp, r5, ess, plame in CONCEPTOS_CC:
+        if cod in existentes and existentes[cod].naturaleza != "PARAMETRO":       # ajustes de f18 sobre conceptos ya sembrados
+            c = existentes[cod]
+            if plame and not c.codigo_plame:
+                c.codigo_plame = plame
+            if cod in ("@MOVILIDAD_CC", "@ASIGNACION_ESCOLAR"):
+                c.afecta_5ta_regular = bool(r5)
         if cod not in codigos:
             db.add(Concepto(diccionario_id=dic.id, codigo=cod, descripcion=desc, categoria=cat, naturaleza=nat, calculado=calc,
                             afecta_afp_onp=bool(afp), afecta_5ta_regular=bool(r5), afecta_5ta_directa=False,

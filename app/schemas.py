@@ -42,6 +42,7 @@ class EmpleadoIn(BaseModel):
     sueldo_basico: Optional[float] = Field(default=None, gt=0)      # obligatorio salvo en Construcción Civil (el jornal sale de las tarifas)
     tipo_obrero: Optional[str] = None
     hijos: int = Field(default=0, ge=0, le=20)
+    movilidad: bool = True
     puesto: Optional[str] = None
     sede: Optional[str] = None
     sistema_pensionario: str = "ONP"
@@ -152,6 +153,7 @@ class ReaperturaIn(BaseModel):
 class EmpleadoPatch(BaseModel):
     tipo_obrero: Optional[str] = None
     hijos: Optional[int] = Field(default=None, ge=0, le=20)
+    movilidad: Optional[bool] = None
     puesto: Optional[str] = None
     sede: Optional[str] = None
     sistema_pensionario: Optional[str] = None

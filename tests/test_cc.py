@@ -108,3 +108,29 @@ def test_f17_gratificacion_regla_excel_semana_incompleta(entorno):
     cli.put(f"{API}/empresas/{eid}/cc/tarifas", headers=H(k), json={"vigente_desde": "2026-01-01", "valores": {"GRATI_REGLA": "1"}})
     pid = _semana(cli, k, eid)
     assert _det(cli, k, eid, pid, op)["@GRATIF_CC"] == 119.07      # semana completa: ambas reglas coinciden
+
+
+def test_f18_quinta_semanal_movilidad_y_plame(entorno):
+    cli, k, eid = _cc(entorno, cc_beneficios_semanales=False)
+    op = _obrero(cli, k, eid, "OPERARIO", "40000030", movilidad=False)
+    pid = _semana(cli, k, eid)
+    d = _det(cli, k, eid, pid, op)
+    assert "@MOVILIDAD_CC" not in d                                  # dato informado: sin movilidad
+    assert "@IMP_RENTA_5TA" not in d                                 # 6 días ≈ 1 000 semanales ×30 sem. < 7 UIT? (si superara, el impuesto aparecería)
+    cli.put(f"{API}/empresas/{eid}/cc/tarifas", headers=H(k), json={"vigente_desde": "2026-01-01", "valores": {"JORNAL_OPERARIO": "400"}})
+    pid2 = _semana(cli, k, eid, "2026-06-08")
+    d2 = _det(cli, k, eid, pid2, op)
+    assert d2["@IMP_RENTA_5TA"] > 0                                  # base semanal alta: la proyección supera 7 UIT
+    db = SessionLocal()
+    from app.models import Concepto
+    cods = {c.codigo: c.codigo_plame for c in db.query(Concepto).filter(Concepto.codigo.in_(["@BUC", "@FONDO_CAPACITACION", "@CONAFOVICER"]))}
+    db.close()
+    assert cods["@BUC"] == "0311" and cods["@FONDO_CAPACITACION"] == "0817" and cods["@CONAFOVICER"] == "0602"
+
+
+def test_f18_cc_sin_liquidacion(entorno):
+    cli, k, eid = _cc(entorno)
+    _obrero(cli, k, eid, "PEON", "40000040")
+    pid = _semana(cli, k, eid)
+    r = cli.get(f"{API}/empresas/{eid}/liquidaciones?periodo_id={pid}", headers=H(k))
+    assert r.status_code == 200 and r.json()["filas"] == []

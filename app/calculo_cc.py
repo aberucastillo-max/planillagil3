@@ -27,6 +27,22 @@ def dias_lab(ini: date, fin: date, desde: date, hasta: date) -> int:
     return n
 
 
+def previos_5ta_semanal(db: Session, empresa_id: int, empleado_id: int, fi: date, afectas: set):
+    """Base afecta a 5.ª y retención ya practicadas al obrero en las semanas anteriores del mismo año (misma empresa)."""
+    ids = [p.id for p in db.query(Periodo).filter(Periodo.empresa_id == empresa_id, Periodo.fase.like("Semana%"),
+                                                  Periodo.fecha_inicio >= date(fi.year, 1, 1), Periodo.fecha_inicio < fi)]
+    if not ids:
+        return CERO, CERO
+    base, ret = CERO, CERO
+    for d in db.query(Detalle).filter(Detalle.periodo_id.in_(ids), Detalle.empleado_id == empleado_id):
+        if d.concepto_codigo == "@IMP_RENTA_5TA":
+            ret += D(d.monto)
+        elif d.categoria == "INGRESO" and d.concepto_codigo in afectas:
+            base += D(d.monto)
+    return base, ret
+
+
+
 def recalcular_semana(db: Session, periodo: Periodo) -> dict:
     exigir_abierto(periodo)
     dic = db.get(Diccionario, periodo.diccionario_id)
@@ -52,7 +68,7 @@ def recalcular_semana(db: Session, periodo: Periodo) -> dict:
         novedades[n.empleado_id][n.concepto_codigo] = D(n.valor)
     db.query(Detalle).filter(Detalle.periodo_id == periodo.id).delete(synchronize_session=False)
     db.query(Resultado).filter(Resultado.periodo_id == periodo.id).delete(synchronize_session=False)
-    alertas: List[str] = ["Planilla semanal: la retención de 5.ª categoría no se calcula (por validar con su contador)."]
+    alertas: List[str] = ["5.ª categoría semanal: proyección anual (semanas restantes × base de la semana + lo acumulado), menos 7 UIT, y la retención se reparte entre las semanas que faltan (Reglamento LIR art. 40; Informe SUNAT 065-2009). Valide con su contador."]
     horas_dia, semanal = D(pr["HORAS_DIA"]), bool(empresa.cc_beneficios_semanales)
     for emp in emps:
         nombre = f"{emp.apellidos}, {emp.nombres}"
@@ -88,7 +104,9 @@ def recalcular_semana(db: Session, periodo: Periodo) -> dict:
         add("@BUC", jornal * buc_pct * dias, f"{jornal} × {buc_pct * 100:.0f} % × {dias} días")
         if clave_bae:
             add("@BAE", jornal * v[clave_bae] * dias, f"{jornal} × {v[clave_bae] * 100:.0f} % × {dias} días")
-        add("@MOVILIDAD_CC", v["MOVILIDAD_DIA"] * dias, f"{v['MOVILIDAD_DIA']} × {dias} días")
+        con_mov = bool(nov["@APLICA_MOVILIDAD"]) if "@APLICA_MOVILIDAD" in nov else bool(emp.movilidad if emp.movilidad is not None else True)
+        if con_mov:
+            add("@MOVILIDAD_CC", v["MOVILIDAD_DIA"] * dias, f"{v['MOVILIDAD_DIA']} × {dias} días")
         vh = jornal / horas_dia
         h60, h100 = nov.get("@HEXT_60", CERO), nov.get("@HEXT_100", CERO)
         if h60:
@@ -143,6 +161,14 @@ def recalcular_semana(db: Session, periodo: Periodo) -> dict:
             add("@FONDO_CAPACITACION", jornal * dias * v["FONDO_CAPACIT_PCT"], f"{jornal * dias} × {v['FONDO_CAPACIT_PCT'] * 100:.2f} %")
         if v.get("SCTR_PCT", CERO):
             add("@SCTR_CC", base_ess * v["SCTR_PCT"], f"{base_ess} × {v['SCTR_PCT'] * 100:.2f} %")
+        base_5ta = bolsa("afecta_5ta_regular")
+        sem_rest = ((date(fi.year, 12, 31) - fi).days // 7) + 1
+        prev_base, prev_ret = previos_5ta_semanal(db, empresa.id, emp.id, fi, {k for k, c in pr.conceptos.items() if c.afecta_5ta_regular})
+        bruta = prev_base + base_5ta * sem_rest
+        neta = max(bruta - (D(pr["DEDUCCION_5TA_UIT"]) + D(pr["DEDUCCION_ADICIONAL_5TA_UIT"])) * D(pr["UIT"]), CERO)
+        imp = R.impuesto_anual_5ta(neta, pr["UIT"], pr.escala)
+        ret5 = R.q2(max((imp - prev_ret) / D(sem_rest), CERO))
+        add("@IMP_RENTA_5TA", ret5, f"proyección {R.q2(bruta)} ({sem_rest} sem.) − 7 UIT → impuesto anual {imp} − retenido {prev_ret}, ÷ {sem_rest} sem.")
         ess = R.q2(base_ess * pr["ESSALUD_TASA"]) if base_ess > 0 else CERO          # sin mínimo mensual: la semana no lo alcanza
         add("@ESSALUD", ess, f"base {base_ess}")
         ingresos = sum((f["monto"] for f in filas if f["categoria"] == "INGRESO"), CERO)
