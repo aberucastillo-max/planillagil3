@@ -173,6 +173,7 @@ class Empleado(Base):
     centro_costo = Column(String(100))
     categoria = Column(String(30), default="EMPLEADOS")
     calificacion = Column(String(60))
+    hijos = Column(Integer, nullable=False, default=0)   # hijos para asignación escolar (Construcción Civil)
     tipo_obrero = Column(String(30))                      # Construcción Civil: OPERARIO | OFICIAL | PEON | OP_EQUIPO_MEDIANO ...
     tipo_comision = Column(String(6), nullable=False, default="FLUJO")      # FLUJO | MIXTA (comisión por saldo): define la comisión de planilla
     __table_args__ = (

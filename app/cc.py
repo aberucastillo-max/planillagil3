@@ -44,8 +44,21 @@ VALORES_CONVENIO: Dict[str, tuple] = {
     "HE_PCT_60": ("0.60", "Horas extras: recargo primeras horas (%)", "Jornada"),
     "HE_PCT_100": ("1.00", "Horas extras: recargo posterior / feriados (%)", "Jornada"),
     "CONAFOVICER_PCT": ("0.02", "CONAFOVICER (% sobre jornal + DSO + feriados)", "Descuentos"),
+    "ESCOLAR_OPERARIO": ("7.44", "Asignación escolar por hijo · Operario (S/ por día)", "Bonificaciones"),
+    "ESCOLAR_OFICIAL": ("5.81", "Asignación escolar por hijo · Oficial (S/ por día)", "Bonificaciones"),
+    "ESCOLAR_PEON": ("5.23", "Asignación escolar por hijo · Peón (S/ por día)", "Bonificaciones"),
+    "ALTURA_PCT": ("0", "Bonificación por altura (% del jornal por día; 0 = no aplica, cargue el % de su convenio)", "Bonificaciones"),
+    "ALTITUD_PCT": ("0", "Bonificación por altitud (% del jornal por día; 0 = no aplica)", "Bonificaciones"),
+    "NOCTURNA_PCT": ("0", "Bonificación por trabajo nocturno (% del jornal por día; 0 = no aplica)", "Bonificaciones"),
+    "FONDO_CAPACIT_PCT": ("0.0045", "Fondo de Capacitación de la Construcción (% del jornal básico, aporte del empleador)", "Aportes del empleador"),
+    "SCTR_PCT": ("0", "SCTR (% de la base asegurable, aporte del empleador; use la tasa de su póliza)", "Aportes del empleador"),
+    "AFP_COMPL_TRAB_PCT": ("0", "AFP aporte complementario del trabajador (% de la base; validar con AFPnet)", "Descuentos"),
+    "AFP_COMPL_EMP_PCT": ("0", "AFP aporte complementario del empleador (% de la base; validar con AFPnet)", "Aportes del empleador"),
+    "CUOTA_SINDICAL_PCT": ("0", "Cuota sindical (% del jornal básico; si es monto fijo cárguelo como novedad)", "Descuentos"),
+    "GRATI_REGLA": ("0", "Gratificación en semana incompleta: 0 = proporcional a los días (Federación), 1 = +1 día solo si las horas superan el umbral (Excel)", "Beneficios sociales"),
+    "GRATI_UMBRAL_HORAS": ("42.5", "Gratificación regla 1: horas de la semana que dan derecho al día adicional", "Beneficios sociales"),
 }
-GRUPOS = ["Jornales", "Bonificaciones", "Beneficios sociales", "Jornada", "Descuentos"]
+GRUPOS = ["Jornales", "Bonificaciones", "Beneficios sociales", "Jornada", "Descuentos", "Aportes del empleador"]
 
 # codigo, descripcion, categoria, naturaleza, calculado, afp_onp, 5ta_reg, essalud, codigo_plame (por validar)
 CONCEPTOS_CC = [
@@ -63,12 +76,26 @@ CONCEPTOS_CC = [
     ("@BONIF_EXTRA_CC", "Bonificación extraordinaria sobre la gratificación", "INGRESO", "FORMULA", True, 0, 1, 0, None),
     ("@CONAFOVICER", "Aporte CONAFOVICER", "DESCUENTO", "FORMULA", True, 0, 0, 0, None),
     ("@ASIGNACION_ESCOLAR", "Asignación escolar", "INGRESO", "VARIABLE", False, 0, 0, 0, None),
+    ("@BONIF_ALTURA", "Bonificación por altura", "INGRESO", "FORMULA", True, 1, 1, 1, None),
+    ("@BONIF_ALTITUD", "Bonificación por altitud", "INGRESO", "FORMULA", True, 1, 1, 1, None),
+    ("@BONIF_NOCTURNA", "Bonificación por trabajo nocturno", "INGRESO", "FORMULA", True, 1, 1, 1, None),
+    ("@FONDO_CAPACITACION", "Fondo de Capacitación de la Construcción (empleador)", "APORTE", "FORMULA", True, 0, 0, 0, None),
+    ("@SCTR_CC", "SCTR (empleador)", "APORTE", "FORMULA", True, 0, 0, 0, None),
+    ("@AFP_COMPL_EMP", "AFP aporte complementario (empleador)", "APORTE", "FORMULA", True, 0, 0, 0, None),
+    ("@AFP_COMPL_TRAB", "AFP aporte complementario (trabajador)", "DESCUENTO", "FORMULA", True, 0, 0, 0, None),
+    ("@CUOTA_SINDICAL", "Cuota sindical", "DESCUENTO", "VARIABLE", False, 0, 0, 0, None),
+    ("@PRESTAMO", "Préstamo", "DESCUENTO", "VARIABLE", False, 0, 0, 0, None),
+    ("@DSCTO_JUDICIAL", "Descuento judicial", "DESCUENTO", "VARIABLE", False, 0, 0, 0, None),
+    ("@DSCTO_OTROS", "Otros descuentos", "DESCUENTO", "VARIABLE", False, 0, 0, 0, None),
+    ("@DIAS_ALTURA", "Días con bonificación por altura", "PARAMETRO", "VARIABLE", False, 0, 0, 0, None),
+    ("@DIAS_ALTITUD", "Días con bonificación por altitud", "PARAMETRO", "VARIABLE", False, 0, 0, 0, None),
+    ("@DIAS_NOCTURNO", "Días con bonificación nocturna", "PARAMETRO", "VARIABLE", False, 0, 0, 0, None),
     ("@HEXT_60", "Horas extras 60 % (cantidad)", "PARAMETRO", "VARIABLE", False, 0, 0, 0, None),
     ("@HEXT_100", "Horas extras 100 % (cantidad)", "PARAMETRO", "VARIABLE", False, 0, 0, 0, None),
     ("@HORAS_TRABAJADAS", "Horas trabajadas en la semana", "PARAMETRO", "VARIABLE", False, 0, 0, 0, None),
     ("@DIAS_FERIADO", "Días de feriado pagado", "PARAMETRO", "VARIABLE", False, 0, 0, 0, None),
 ]
-HANDLED_CC = {"@DIAS_TRABAJADOS", "@HEXT_60", "@HEXT_100", "@HORAS_TRABAJADAS", "@DIAS_FERIADO"}
+HANDLED_CC = {"@DIAS_TRABAJADOS", "@HEXT_60", "@HEXT_100", "@HORAS_TRABAJADAS", "@DIAS_FERIADO", "@DIAS_ALTURA", "@DIAS_ALTITUD", "@DIAS_NOCTURNO"}
 
 
 def aplicar_overrides(db: Session, empresa_id: int, fecha: date, valores: Dict[str, Decimal]) -> None:

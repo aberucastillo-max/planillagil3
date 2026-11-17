@@ -100,9 +100,23 @@ def recalcular_semana(db: Session, periodo: Periodo) -> dict:
             add("@INDEMNIZACION_CC", (base_ben + vh * (h60 + h100)) * v["INDEM_PCT"], f"{v['INDEM_PCT'] * 100:.0f} % del jornal")
             add("@VACACIONES_TRUNCAS_CC", base_ben * v["VAC_PCT"], f"{v['VAC_PCT'] * 100:.0f} % del jornal")
             div = v["GRATI_DIV_ENE_JUL"] if periodo.fecha_fin.month <= 7 else v["GRATI_DIV_AGO_DIC"]
-            grat = v["GRATI_JORNALES"] * jornal / div * 7 * D(dias) / 6
-            add("@GRATIF_CC", grat, f"{v['GRATI_JORNALES']:.0f} jornales ÷ {div:.0f} × 7 días × {dias}/6")
+            if v.get("GRATI_REGLA", CERO) == 1:                 # regla del Excel: +1 día (domingo) solo si las horas superan el umbral
+                extra = 1 if horas > v.get("GRATI_UMBRAL_HORAS", D("42.5")) else 0
+                grat = v["GRATI_JORNALES"] * jornal / div * (horas / horas_dia + extra)
+                add("@GRATIF_CC", grat, f"{v['GRATI_JORNALES']:.0f} jornales ÷ {div:.0f} × ({horas / horas_dia:.2f} días + {extra})")
+            else:
+                grat = v["GRATI_JORNALES"] * jornal / div * 7 * D(dias) / 6
+                add("@GRATIF_CC", grat, f"{v['GRATI_JORNALES']:.0f} jornales ÷ {div:.0f} × 7 días × {dias}/6")
             add("@BONIF_EXTRA_CC", R.q2(grat) * v["BONIF_EXTRA_CC_PCT"], f"{v['BONIF_EXTRA_CC_PCT'] * 100:.0f} % de la gratificación")
+        for cod, clave, dclave in (("@BONIF_ALTURA", "ALTURA_PCT", "@DIAS_ALTURA"), ("@BONIF_ALTITUD", "ALTITUD_PCT", "@DIAS_ALTITUD"),
+                                   ("@BONIF_NOCTURNA", "NOCTURNA_PCT", "@DIAS_NOCTURNO")):
+            pct, dn = v.get(clave, CERO), nov.get(dclave, CERO)
+            if pct and dn:
+                add(cod, jornal * pct * dn, f"{jornal} × {pct * 100:.2f} % × {dn} días")
+        hijos = int(emp.hijos or 0)
+        if hijos and "@ASIGNACION_ESCOLAR" not in nov and "@ASIGNACION_ESCOLAR" in pr.conceptos:
+            esc = v.get(f"ESCOLAR_{cat}", CERO)
+            add("@ASIGNACION_ESCOLAR", esc * hijos * dias, f"{esc} × {hijos} hijo(s) × {dias} días")
         for cod, val in nov.items():                              # novedades de cualquier otro concepto cargable (p. ej. asignación escolar)
             if cod not in HANDLED_CC:
                 add(cod, val, "Novedad cargada", origen="NOVEDAD")
@@ -117,8 +131,18 @@ def recalcular_semana(db: Session, periodo: Periodo) -> dict:
             add("@FONDO_PENSIONES", ap, f"{base_prev} × {afp.aporte}"); add("@COMISION_VARIABLE", co, f"{base_prev} × {com}"); add("@SEGURO_INVALIDEZ", pri, "prima de seguro")
         else:
             add("@SNP_ONP", R.calcular_onp(base_prev, pr["ONP_TASA"]), f"{base_prev} × {pr['ONP_TASA']}")
+        if emp.sistema_pensionario == "AFP" and v.get("AFP_COMPL_TRAB_PCT", CERO):
+            add("@AFP_COMPL_TRAB", base_prev * v["AFP_COMPL_TRAB_PCT"], f"{base_prev} × {v['AFP_COMPL_TRAB_PCT'] * 100:.2f} %")
+        if emp.sistema_pensionario == "AFP" and v.get("AFP_COMPL_EMP_PCT", CERO):
+            add("@AFP_COMPL_EMP", base_prev * v["AFP_COMPL_EMP_PCT"], f"{base_prev} × {v['AFP_COMPL_EMP_PCT'] * 100:.2f} %")
+        if "@CUOTA_SINDICAL" not in nov and v.get("CUOTA_SINDICAL_PCT", CERO):
+            add("@CUOTA_SINDICAL", jornal * dias * v["CUOTA_SINDICAL_PCT"], f"{v['CUOTA_SINDICAL_PCT'] * 100:.2f} % del jornal básico")
         base_conaf = sum((f["monto"] for f in filas if f["codigo"] in ("@JORNAL_BASICO", "@DSO", "@FERIADO")), CERO)
         add("@CONAFOVICER", base_conaf * v["CONAFOVICER_PCT"], f"{base_conaf} × {v['CONAFOVICER_PCT'] * 100:.0f} %")
+        if v.get("FONDO_CAPACIT_PCT", CERO):
+            add("@FONDO_CAPACITACION", jornal * dias * v["FONDO_CAPACIT_PCT"], f"{jornal * dias} × {v['FONDO_CAPACIT_PCT'] * 100:.2f} %")
+        if v.get("SCTR_PCT", CERO):
+            add("@SCTR_CC", base_ess * v["SCTR_PCT"], f"{base_ess} × {v['SCTR_PCT'] * 100:.2f} %")
         ess = R.q2(base_ess * pr["ESSALUD_TASA"]) if base_ess > 0 else CERO          # sin mínimo mensual: la semana no lo alcanza
         add("@ESSALUD", ess, f"base {base_ess}")
         ingresos = sum((f["monto"] for f in filas if f["categoria"] == "INGRESO"), CERO)

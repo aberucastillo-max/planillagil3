@@ -43,6 +43,7 @@ def preparar_base():
                 c.execute(text(f"ALTER TABLE empresas ADD COLUMN IF NOT EXISTS {col} {tipo}"))
             c.execute(text("ALTER TABLE empresas ADD COLUMN IF NOT EXISTS cc_beneficios_semanales BOOLEAN NOT NULL DEFAULT TRUE"))
             c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_obrero VARCHAR(30)"))
+            c.execute(text("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS hijos INTEGER NOT NULL DEFAULT 0"))
     db = SessionLocal()
     try:
         sembrar_rg728(db)

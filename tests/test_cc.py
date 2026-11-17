@@ -88,3 +88,23 @@ def test_carga_masiva_cc_toma_jornal_de_las_tarifas(entorno):
     db.close()
     txt = str(r)
     assert "Tipo de obrero obligatorio" in txt and "CREAR" in txt
+
+
+def test_f17_escolar_fondo_capacitacion_y_complementarios(entorno):
+    cli, k, eid = _cc(entorno, cc_beneficios_semanales=False)
+    peon = _obrero(cli, k, eid, "PEON", "40000020", hijos=2)
+    cli.put(f"{API}/empresas/{eid}/cc/tarifas", headers=H(k), json={"vigente_desde": "2026-01-01", "valores": {"CUOTA_SINDICAL_PCT": "0.01", "SCTR_PCT": "0.0155"}})
+    pid = _semana(cli, k, eid)
+    d = _det(cli, k, eid, pid, peon)
+    assert d["@ASIGNACION_ESCOLAR"] == 62.76                       # 5.23 × 2 hijos × 6 días
+    assert d["@FONDO_CAPACITACION"] == 1.70                        # 0.45 % de 62.80 × 6
+    assert d["@CUOTA_SINDICAL"] == 3.77 and d["@SCTR_CC"] > 0
+    assert "@AFP_COMPL_TRAB" not in d                              # por defecto 0 y solo con AFP
+
+
+def test_f17_gratificacion_regla_excel_semana_incompleta(entorno):
+    cli, k, eid = _cc(entorno)
+    op = _obrero(cli, k, eid, "OPERARIO", "40000021")
+    cli.put(f"{API}/empresas/{eid}/cc/tarifas", headers=H(k), json={"vigente_desde": "2026-01-01", "valores": {"GRATI_REGLA": "1"}})
+    pid = _semana(cli, k, eid)
+    assert _det(cli, k, eid, pid, op)["@GRATIF_CC"] == 119.07      # semana completa: ambas reglas coinciden
