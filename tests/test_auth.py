@@ -130,3 +130,26 @@ def test_clave_api_y_admin_siguen_funcionando(entorno):
     cli, nueva = entorno
     clave = nueva("Cuenta API")
     assert cli.get(f"{API}/empresas", headers=H(clave)).status_code == 200
+
+
+def test_regimenes_segun_plan(entorno, monkeypatch):
+    cli, nueva = entorno
+    adm = _admin(monkeypatch)
+    # plan gratuito: solo Régimen General
+    g = cli.post(f"{API}/admin/cuentas", headers=adm, json={"nombre": "Gratis", "plan": "GRATIS"}).json()["api_key"]
+    r = cli.get(f"{API}/regimenes", headers=H(g)).json()
+    por = {x["codigo"]: x for x in r["regimenes"]}
+    assert r["plan"] == "GRATIS" and por["RG_728"]["disponible"] and not por["MYPE_MICRO"]["permitido_por_plan"] and "plan superior" in por["MYPE_MICRO"]["motivo"]
+    eid = cli.post(f"{API}/empresas", headers=H(g), json={"ruc": "20100070970", "razon_social": "Demo SAC"}).json()["id"]
+    base = {"nombres": "Ana", "apellidos": "Ruiz", "documento_identidad": "45678912", "fecha_ingreso": "2026-01-02", "sueldo_basico": 2000, "sistema_pensionario": "ONP"}
+    x = cli.post(f"{API}/empresas/{eid}/empleados", headers=H(g), json={**base, "regimen": "MYPE_MICRO"})
+    assert x.status_code == 403 and "plan" in x.json()["detail"]
+    assert cli.post(f"{API}/empresas/{eid}/empleados", headers=H(g), json={**base, "regimen": "XX"}).status_code == 422
+    assert cli.post(f"{API}/empresas/{eid}/empleados", headers=H(g), json=base).status_code == 201     # sin régimen = General
+    # plan de pago: el régimen está permitido, pero sus reglas aún no están cargadas
+    p = cli.post(f"{API}/admin/cuentas", headers=adm, json={"nombre": "Pago", "plan": "FREELANCER"}).json()["api_key"]
+    por = {x["codigo"]: x for x in cli.get(f"{API}/regimenes", headers=H(p)).json()["regimenes"]}
+    assert por["MYPE_MICRO"]["permitido_por_plan"] and not por["MYPE_MICRO"]["disponible"] and "Próximamente" in por["MYPE_MICRO"]["motivo"]
+    e2 = cli.post(f"{API}/empresas", headers=H(p), json={"ruc": "20100070970", "razon_social": "Otra SAC"}).json()["id"]
+    y = cli.post(f"{API}/empresas/{e2}/empleados", headers=H(p), json={**base, "regimen": "MYPE_PEQUENA"})
+    assert y.status_code == 422 and "reglas" in y.json()["detail"]

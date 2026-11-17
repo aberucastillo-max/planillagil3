@@ -31,6 +31,7 @@ class EmpleadoIn(BaseModel):
     apellidos: str = Field(min_length=1, max_length=100)
     tipo_documento: str = "DNI"
     documento_identidad: str
+    regimen: str = "RG_728"
     fecha_ingreso: date
     sueldo_basico: float = Field(gt=0)
     puesto: Optional[str] = None

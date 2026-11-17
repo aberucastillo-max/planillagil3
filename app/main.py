@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from . import calculo, carga_masiva, carga_novedades, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
+from . import planes, calculo, carga_masiva, carga_novedades, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
 from .config import allowed_origins
 from .db import get_db
 from .diccionario import ErrorDeNegocio, admite_carga
@@ -142,7 +142,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-17-f13"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-17-f14"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -316,13 +316,14 @@ def crear_empleado(data: EmpleadoIn, empresa: Empresa = Depends(empresa_actual),
         nombres = {a.nombre.upper() for a in db.query(DiccionarioAFP).filter(DiccionarioAFP.diccionario_id == empresa.diccionario_id)}
         if data.afp_nombre.upper() not in nombres:
             raise HTTPException(422, f"AFP no reconocida. Opciones: {', '.join(sorted(nombres))}")
+    planes.exigir_regimen(db, db.get(Cuenta, empresa.cuenta_id).plan, data.regimen)
     e = Empleado(empresa_id=empresa.id, nombres=data.nombres.upper(), apellidos=data.apellidos.upper(),
                  tipo_documento=data.tipo_documento, documento_identidad=data.documento_identidad,
                  puesto=(data.puesto or "").upper() or None, sede=data.sede, fecha_ingreso=data.fecha_ingreso,
                  sistema_pensionario=data.sistema_pensionario,
                  afp_nombre=data.afp_nombre.upper() if data.afp_nombre else None, cuspp=data.cuspp,
                  banco=data.banco, numero_cuenta=data.numero_cuenta, asignacion_familiar=data.asignacion_familiar,
-                 cobertura_eps=data.cobertura_eps, regimen_codigo="RG_728", tipo_contrato=data.tipo_contrato,
+                 cobertura_eps=data.cobertura_eps, regimen_codigo=data.regimen, tipo_contrato=data.tipo_contrato,
                  fecha_fin_contrato=data.fecha_fin_contrato, area=data.area, centro_costo=data.centro_costo,
                  categoria=data.categoria or "EMPLEADOS", calificacion=data.calificacion,
                  tipo_comision=data.tipo_comision if data.sistema_pensionario == "AFP" else "FLUJO")
@@ -888,6 +889,12 @@ def exportar_afpnet(periodo_id: int, formato: str = Query("xlsx", pattern="^(xls
     return Response(contenido, media_type=mime, headers={
         "Content-Disposition": f"attachment; filename={nombre}",
         "X-Avisos": _avisos_header(exportadores.avisos_consolidacion(db, p))})
+
+
+@app.get(API + "/regimenes")
+def listar_regimenes(acceso: Acceso = Depends(get_acceso), db: Session = Depends(get_db)):
+    """Regímenes y si el plan de la cuenta los habilita (los bloqueados se muestran en la pantalla con su motivo)."""
+    return {"plan": acceso.cuenta.plan if acceso.cuenta else None, "regimenes": planes.estado_regimenes(db, acceso.cuenta.plan if acceso.cuenta else None)}
 
 
 @app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-asiento")
