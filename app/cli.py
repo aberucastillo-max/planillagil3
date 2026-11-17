@@ -35,6 +35,19 @@ def crear_cuenta(nombre: str, plan: str, max_empresas=None, max_trabajadores=Non
     return clave
 
 
+def crear_usuario(cuenta_id: int, email: str, nombre: str, rol: str = "PROPIETARIO"):
+    from . import usuarios as U
+    from .models import Usuario
+    db = SessionLocal()
+    try:
+        temp = U.clave_temporal()
+        db.add(Usuario(cuenta_id=cuenta_id, email=email.strip().lower(), nombre=nombre, rol=rol, clave_hash=U.hash_clave(temp), debe_cambiar_clave=True))
+        db.commit()
+    finally:
+        db.close()
+    print(f"Usuario creado. Contraseña temporal (se pedirá cambiarla al ingresar; no se vuelve a mostrar):\n{temp}")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -44,8 +57,15 @@ if __name__ == "__main__":
     c.add_argument("--plan", choices=list(PLANES), default="GRATIS")
     c.add_argument("--max-empresas", type=int)
     c.add_argument("--max-trabajadores", type=int)
+    u = sub.add_parser("crear-usuario")
+    u.add_argument("--cuenta-id", type=int, required=True)
+    u.add_argument("--email", required=True)
+    u.add_argument("--nombre", required=True)
+    u.add_argument("--rol", choices=["PROPIETARIO", "OPERADOR", "CONSULTA"], default="PROPIETARIO")
     a = ap.parse_args()
     if a.cmd == "init-db":
         init_db()
+    elif a.cmd == "crear-usuario":
+        crear_usuario(a.cuenta_id, a.email, a.nombre, a.rol)
     else:
         crear_cuenta(a.nombre, a.plan, a.max_empresas, a.max_trabajadores)

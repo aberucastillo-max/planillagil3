@@ -35,6 +35,9 @@ async def _ciclo_de_vida(_):
 app = FastAPI(title="Planilla Ágil API", version="2.0.0", lifespan=_ciclo_de_vida,
               description="Motor de nómina peruana (Régimen General) guiado por Diccionario versionado.")
 
+from .rutas_auth import router as _router_auth  # noqa: E402
+app.include_router(_router_auth)
+
 async def _captura_errores(request, call_next):
     """Un error inesperado o un rechazo de la base (triggers) debe llegar al navegador como JSON con su mensaje y con las
     cabeceras CORS; si no, el navegador solo muestra «Failed to fetch». Va registrado ANTES del CORS para quedar por dentro."""
@@ -139,7 +142,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-13-f12"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-17-f13"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")

@@ -10,7 +10,8 @@ from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from .db import get_db
-from .models import Cuenta, Empresa
+from . import usuarios as U
+from .models import Cuenta, Empresa, Usuario
 
 
 def hash_key(clave: str) -> str:
@@ -34,10 +35,23 @@ def _admin_valido(token: Optional[str]) -> bool:
 class Acceso:
     cuenta: Optional[Cuenta]
     admin: bool
+    usuario: Optional[Usuario] = None
+    token: str = ""
 
 
-def get_acceso(x_api_key: str = Header(None, alias="X-API-Key"), x_admin_token: str = Header(None, alias="X-Admin-Token"),
-               db: Session = Depends(get_db)) -> Acceso:
+def get_acceso(request: Request, x_api_key: str = Header(None, alias="X-API-Key"), x_admin_token: str = Header(None, alias="X-Admin-Token"),
+               authorization: str = Header(None), db: Session = Depends(get_db)) -> Acceso:
+    if authorization and authorization.lower().startswith("bearer ") and not x_admin_token:
+        token = authorization[7:].strip()
+        u = U.usuario_de_token(db, token)
+        if not u or not u.cuenta_activa:
+            raise HTTPException(401, "Su sesión venció. Inicie sesión de nuevo.")
+        ruta = request.url.path
+        if u.debe_cambiar_clave and "/auth/" not in ruta:
+            raise HTTPException(403, "Debe cambiar su contraseña temporal antes de continuar.")
+        if u.rol == "CONSULTA" and request.method not in ("GET", "HEAD", "OPTIONS") and "/auth/" not in ruta:
+            raise HTTPException(403, "Su usuario es de solo consulta: no puede modificar datos.")
+        return Acceso(u.cuenta, False, u, token)
     if x_admin_token:
         if not _admin_valido(x_admin_token):
             raise HTTPException(401, "Código de administrador incorrecto, o el modo administrador no está habilitado.")
@@ -61,6 +75,13 @@ def get_cuenta(request: Request, acceso: Acceso = Depends(get_acceso), db: Sessi
     if not emp:
         raise HTTPException(404, "Empresa no encontrada.")
     return db.get(Cuenta, emp.cuenta_id)
+
+
+def exigir_propietario(acceso: Acceso = Depends(get_acceso)) -> Acceso:
+    """Gestionar usuarios: el propietario de la cuenta (o el administrador). Una clave API de cuenta equivale a propietario."""
+    if acceso.admin or acceso.usuario is None or acceso.usuario.rol == "PROPIETARIO":
+        return acceso
+    raise HTTPException(403, "Solo el propietario de la cuenta puede gestionar usuarios.")
 
 
 def exigir_admin(acceso: Acceso = Depends(get_acceso)) -> Acceso:

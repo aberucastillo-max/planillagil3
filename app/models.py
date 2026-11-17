@@ -12,7 +12,7 @@ from sqlalchemy import (
     JSON, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric,
     String, Text, UniqueConstraint,
 )
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import relationship, declarative_base
 
 Base = declarative_base()
 
@@ -449,3 +449,44 @@ class ConfigVigencia(Base):
     nota = Column(String(200))
     creado = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     __table_args__ = (UniqueConstraint("empresa_id", "familia", "clave", "aplica_desde", name="uq_cfg_vigencia"),)
+
+
+# ----------------------------------------------------------------- usuarios y sesiones (login)
+class Usuario(Base):
+    __tablename__ = "usuarios"
+    id = Column(Integer, primary_key=True)
+    cuenta_id = Column(Integer, ForeignKey("cuentas.id"), nullable=False, index=True)
+    email = Column(String(150), nullable=False, unique=True)            # siempre en minúsculas
+    nombre = Column(String(150), nullable=False)
+    rol = Column(String(12), nullable=False, default="OPERADOR")        # PROPIETARIO | OPERADOR | CONSULTA
+    clave_hash = Column(String(300), nullable=False)
+    activo = Column(Boolean, nullable=False, default=True)
+    debe_cambiar_clave = Column(Boolean, nullable=False, default=False)
+    intentos_fallidos = Column(Integer, nullable=False, default=0)
+    bloqueado_hasta = Column(DateTime(timezone=True))
+    ultimo_acceso = Column(DateTime(timezone=True))
+    creado_en = Column(DateTime(timezone=True), default=_now)
+    cuenta = relationship("Cuenta", lazy="joined")
+
+    @property
+    def cuenta_activa(self):
+        return bool(self.cuenta and self.cuenta.activa)
+
+
+class Sesion(Base):
+    __tablename__ = "sesiones"
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    creado_en = Column(DateTime(timezone=True), default=_now)
+    ultimo_uso = Column(DateTime(timezone=True), default=_now)
+    expira = Column(DateTime(timezone=True), nullable=False)
+
+
+class ResetClave(Base):
+    __tablename__ = "reset_clave"
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    expira = Column(DateTime(timezone=True), nullable=False)
+    usado = Column(Boolean, nullable=False, default=False)
