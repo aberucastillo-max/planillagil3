@@ -51,6 +51,7 @@ COLS = [
     ("sede", "Sede", "Texto", P, "Por ejemplo: Lima Principal · Magdalena del Mar.", "Nuevo: sin sede. Existente: no cambia.", "MAGDALENA DEL MAR", ""),
     ("area", "Área", "Texto", P, "Nombre del área.", "Nuevo: sin área. Existente: no cambia.", "ADMINISTRACION Y GH", "Si la empresa registró el catálogo de áreas, Cálculo avisa a quienes no coincidan."),
     ("centro_costo", "Centro de costo", "Texto", P, "Código y nombre, por ejemplo 000001101 ADMINISTRATIVO.", "Nuevo: sin centro de costo. Existente: no cambia.", "000001101 ADMINISTRATIVO", "Igual que el área."),
+    ("regimen", "Régimen laboral", "Lista", P, "RG_728 · MYPE_MICRO · MYPE_PEQUENA (también: Régimen General, Microempresa, Pequeña empresa).", "Se asume el régimen de la empresa.", "RG_728", "Debe ser el de la empresa: el régimen se define al registrarla (Configuración General → Empresas)."),
     ("categoria", "Categoría", "Texto", P, "Categoría de planilla.", "Nuevo: EMPLEADOS. Existente: no cambia.", "EMPLEADOS", ""),
     ("calificacion", "Calificación", "Texto", P, "Por ejemplo: CONFIANZA - NO FISCAL.", "Nuevo: sin calificación. Existente: no cambia.", "", ""),
     ("banco", "Banco", "Lista", P, "BCP · BBVA · INTERBANK · SCOTIABANK (se admite otro texto).", "Nuevo: sin banco. Existente: no cambia.", "BCP", ""),
@@ -60,6 +61,10 @@ CLAVE_COL = {c[0]: c for c in COLS}
 OBLIGATORIAS = [c[0] for c in COLS if c[3] == O]
 MAX_LARGO = {"apellidos": 100, "nombres": 100, "puesto": 150, "sede": 100, "area": 100, "centro_costo": 100, "categoria": 30, "calificacion": 60, "banco": 60, "numero_cuenta": 50, "cuspp": 15, "documento": 15}
 ETIQ = {k: v[1] for k, v in CLAVE_COL.items()}
+
+
+_REG_ALIAS = {"RG728": "RG_728", "REGIMENGENERAL": "RG_728", "GENERAL": "RG_728", "MYPEMICRO": "MYPE_MICRO", "MICROEMPRESA": "MYPE_MICRO", "MICRO": "MYPE_MICRO",
+              "MYPEPEQUENA": "MYPE_PEQUENA", "PEQUENAEMPRESA": "MYPE_PEQUENA", "PEQUENA": "MYPE_PEQUENA"}
 
 
 def _norm(s) -> str:
@@ -209,6 +214,11 @@ def analizar(db, empresa, cuenta, filas: list):
         tc = txt("tipo_comision").upper()
         if tc and tc not in ("FLUJO", "MIXTA"):
             err.append("Tipo de comisión debe ser FLUJO o MIXTA.")
+        rg = _REG_ALIAS.get(_norm(txt("regimen")), None) if txt("regimen") else empresa.regimen_codigo
+        if rg is None:
+            err.append(f"Régimen «{txt('regimen')}» no válido (use RG_728, MYPE_MICRO o MYPE_PEQUENA).")
+        elif rg != empresa.regimen_codigo:
+            err.append(f"Régimen {rg}: esta empresa es {empresa.regimen_codigo}. Todos sus trabajadores usan el régimen de la empresa.")
         asig, e3 = _si_no(v.get("asignacion_familiar")); eps, e4 = _si_no(v.get("cobertura_eps"))
         if e3: err.append("Asignación familiar: " + e3)
         if e4: err.append("Cobertura EPS: " + e4)

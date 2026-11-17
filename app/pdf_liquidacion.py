@@ -109,7 +109,7 @@ def generar_pdf(empresa, doc: dict, con_formulas: bool = False, con_firmas: bool
     izq = [f"APELLIDOS, NOMBRES : {snap['colaborador'].replace(', ', ' ', 1)}", f"CODIGO : {snap['documento']}",
            f"FECHA DE INGRESO : {dmy(snap['fecha_ingreso'])}", f"MOTIVO DE RETIRO : {motivo_texto(doc.get('motivo_cese'), doc.get('clase_despido'))}",
            f"TIEMPO DE SERVICIOS EN LA EMPRESA : {_tiempo_formato(snap)}"]
-    der = [f"UNIDAD : {snap.get('sede') or ''}", f"PLANILLA : {snap.get('categoria') or ''}", f"FECHA DE EGRESO : {dmy(snap['fecha_cese'])}",
+    der = [f"UNIDAD : {snap.get('sede') or ''}", f"PLANILLA : {snap.get('categoria') or ''}" + (f" · {snap['regimen_nombre']}" if snap.get('regimen_nombre') else ""), f"FECHA DE EGRESO : {dmy(snap['fecha_cese'])}",
            f"PUESTO DE TRABAJO : {(snap.get('puesto') or '')}", f"REGIMEN PENSIONES : {regimen_pensiones(snap)}"]
     t = Table([[Paragraph(a, n8), Paragraph(b, n8)] for a, b in zip(izq, der)], colWidths=[W * 0.55, W * 0.45])
     t.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 0.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.5), ("LINEBELOW", (0, -1), (-1, -1), 0.5, colors.black)]))

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from . import reglas as R
 from .calculo import D, af_aplica, FASE_QUINCENA, ids_vigentes, periodo_vigente, periodos_vigentes, sueldo_a_fecha
 from .diccionario import CLAVES_LIQUIDACION, ErrorDeNegocio, cargar_parametros
-from .models import (Auditoria, CtsDeposito, Detalle, Empleado, Liquidacion, LiquidacionDetalle, LiquidacionManual, Periodo,
+from .models import (Empresa, Auditoria, CtsDeposito, Detalle, Empleado, Liquidacion, LiquidacionDetalle, LiquidacionManual, Periodo,
                      RentaPrevia5ta, Resultado, Vacacion)
 
 CERO = Decimal("0")
@@ -194,6 +194,12 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     cese, ing = emp.fecha_cese, emp.fecha_ingreso
     out = CalculoLiq()
     avisos = out.avisos
+    empresa = db.get(Empresa, periodo.empresa_id)
+    from .planes import REGIMENES
+    if empresa.regimen_codigo == "MYPE_MICRO":
+        avisos.append("Régimen MYPE · Microempresa: no corresponde gratificación ni CTS; las vacaciones son de 15 días por año.")
+    elif empresa.regimen_codigo == "MYPE_PEQUENA":
+        avisos.append("Régimen MYPE · Pequeña empresa: gratificación de media remuneración, CTS de 15 remuneraciones diarias por año, vacaciones de 15 días.")
 
     res = db.query(Resultado).filter(Resultado.periodo_id == periodo.id, Resultado.empleado_id == emp.id).first()
     if res is None:
@@ -463,6 +469,8 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
     out.total_descuentos = sum((f["monto"] for f in filas if f["habilitado"] and f["categoria"] == "DESCUENTO"), CERO)
     out.neto = out.total_ingresos - out.total_descuentos
     out.base_previsional, out.base_essalud, out.base_5ta, out.ret_5ta_ajuste = base_afp, base_ess, base_5ta, ajuste
+    if empresa.regimen_codigo == "MYPE_MICRO" and empresa.salud_micro == "SIS" and "SIS_MONTO" in pr.p:
+        dif_ess = dif_eps = CERO            # con SIS el aporte es fijo mensual: la liquidación no genera diferencial de EsSalud
     out.aporte_essalud, out.aporte_eps = dif_ess, dif_eps
 
     out.faltantes = faltantes_para_cerrar(emp, out.cts_anterior_aplica, out.cts_anterior_pagada)
@@ -474,6 +482,7 @@ def calcular(db: Session, periodo: Periodo, emp: Empleado, cts_anterior_pagada: 
         if "@CTS_TRUNCA:2" in excluir: cts_ant_info = None
         if "@GRATIFICACION" in excluir: grat_info = None
     out.snapshot = {
+        "regimen": empresa.regimen_codigo, "regimen_nombre": REGIMENES.get(empresa.regimen_codigo), "norma_mype": empresa.norma_mype,
         "colaborador": f"{emp.apellidos}, {emp.nombres}", "documento": emp.documento_identidad, "puesto": emp.puesto,
         "sede": emp.sede, "categoria": emp.categoria, "area": emp.area, "centro_costo": emp.centro_costo,
         "calificacion": emp.calificacion, "fecha_ingreso": _f(ing), "fecha_cese": _f(cese),

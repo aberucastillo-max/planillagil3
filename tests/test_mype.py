@@ -12,7 +12,7 @@ API = "/api/v1"
 def _env(entorno):
     cli, nueva = entorno
     db = SessionLocal(); sembrar_mype(db); db.close()
-    return cli, nueva("Cuenta MYPE")
+    return cli, nueva("Cuenta MYPE", max_empresas=5)
 
 
 def _empresa(cli, k, **kw):
@@ -77,3 +77,24 @@ def test_asignacion_familiar_configurable(entorno):
     assert cli.post(f"{API}/empresas/{eid}/planillas/{pid}/recalcular", headers=H(k)).status_code == 200
     d = {c["codigo"]: float(c["monto"]) for c in cli.get(f"{API}/empresas/{eid}/planillas/{pid}/resultados/{_trab.last}/detalle", headers=H(k)).json()["conceptos"]}
     assert d["@ASIGNACION_FAMILIAR"] == 113.0
+
+
+def test_liquidacion_mype_vacaciones_15_dias_y_sin_gratificacion_micro(entorno):
+    cli, k = _env(entorno)
+    out = {}
+    for ruc, reg in (("20111111111", "MYPE_MICRO"), ("20222222222", "MYPE_PEQUENA"), ("20333333333", "RG_728")):
+        eid = cli.post(f"{API}/empresas", headers=H(k), json={"ruc": ruc, "razon_social": reg, "regimen": reg}).json()["id"]
+        B = f"{API}/empresas/{eid}"
+        emp = cli.post(f"{B}/empleados", headers=H(k), json={"nombres": "Ana", "apellidos": "Ruiz", "documento_identidad": "45678912", "fecha_ingreso": "2025-10-01",
+                       "sueldo_basico": 3000, "sistema_pensionario": "ONP"}).json()["id"]
+        pid = cli.post(f"{B}/periodos", headers=H(k), json={"anio": 2026, "mes": 10}).json()["id"]
+        assert cli.post(f"{B}/empleados/{emp}/baja", headers=H(k), json={"fecha_cese": "2026-10-01", "motivo": "01"}).status_code == 200
+        assert cli.post(f"{B}/planillas/{pid}/recalcular", headers=H(k)).status_code == 200
+        v = cli.get(f"{B}/liquidaciones/vista?periodo_id={pid}&empleado_id={emp}&cts_anterior_pagada=true", headers=H(k)).json()
+        out[reg] = ({c["codigo"]: float(c["monto"]) for c in v["conceptos"]}, v)
+    g = lambda r: out[r][0]
+    assert "@CTS_TRUNCA" not in g("MYPE_MICRO") and "@GRATIFICACION" not in g("MYPE_MICRO")
+    assert abs(g("MYPE_PEQUENA")["@CTS_TRUNCA"] * 2 - g("RG_728")["@CTS_TRUNCA"]) < 0.05
+    # 1 año de servicio: 15 días en MYPE (pago diario = remuneración/30) frente a 30 días en el general
+    vac = lambda r: g(r).get("@VACACIONES_VENCIDAS", 0) + g(r).get("@VACACIONES_TRUNCAS", 0)
+    assert vac("RG_728") > 0 and abs(vac("MYPE_PEQUENA") * 2 - vac("RG_728")) < 0.05
