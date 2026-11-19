@@ -70,7 +70,7 @@ def test_vacaciones_pendientes_formula_cero_dias_y_monto(entorno):
     ver = _vista(cli, clave, B, pids[10], ana)
     assert ver["estado"] == "CERRADA" and ver["snapshot"]["opciones"]["vacaciones_pendientes"]["modo"] == "MONTO" and any("escrito manualmente" in a for a in ver["avisos"])
     afp = cli.get(f"{B}/planillas/{pids[10]}/exportar-afpnet?formato=csv", headers=H(clave))
-    assert float([l.split(",") for l in afp.text.strip().splitlines()][0][11]) == float(D("2075.33") + D("1988.86") + D("2000.00"))     # boleta + truncas + lo escrito
+    assert float([l.split(",") for l in afp.text.strip().splitlines()][0][11]) == float(D("2113.00") + D("1988.86") + D("2000.00"))     # boleta + truncas + lo escrito
 
 
 def test_simulacion_deshabilitar_conceptos_no_se_puede_cerrar(entorno):

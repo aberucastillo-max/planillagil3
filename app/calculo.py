@@ -259,9 +259,9 @@ def recalcular_periodo(db: Session, periodo: Periodo) -> dict:
         # ---- ingresos calculados
         add("@HABER_BASICO", sueldo / base * dias_trab, f"{sueldo} / {base} x {dias_trab} días")
         af_mensual = R.q2(pr["RMV"] * pr["ASIG_FAM_PCT"]) if af_aplica(db, emp) else CERO
-        if af_mensual and (dias_trab + dias_vac) > 0:
-            add("@ASIGNACION_FAMILIAR", af_mensual / base * (dias_trab + dias_vac),
-                f"{af_mensual} / {base} x {dias_trab + dias_vac} días (10 % RMV)")
+        dias_pagados = dias_trab + dias_vac + subs + dmed + con_goce        # trabajados o no, pero pagados
+        if af_mensual and dias_pagados > 0:                                 # se paga COMPLETA si hay al menos un día pagado
+            add("@ASIGNACION_FAMILIAR", af_mensual, f"10 % RMV completo (hay {dias_pagados} día(s) pagado(s) en el periodo)")
         if dias_vac:
             add("@REMUNERA_VACACIONAL", sueldo / base * dias_vac, f"{sueldo} / {base} x {dias_vac} días de vacaciones")
         vh = R.valor_hora(sueldo, af_mensual, base, int(pr["HORAS_DIA"]))

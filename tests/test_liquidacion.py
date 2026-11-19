@@ -148,7 +148,7 @@ def test_solo_lo_cerrado_viaja_al_afp_plame_y_resumenes(entorno):
     _vista(cli, clave, B, pids[10], ana, True)
     afp = cli.get(f"{B}/planillas/{pids[10]}/exportar-afpnet?formato=csv", headers=H(clave))
     fila = [l.split(",") for l in afp.text.strip().splitlines()][0]
-    assert fila[3] == "45678912" and float(fila[11]) == 2075.33                                        # solo la boleta del mes
+    assert fila[3] == "45678912" and float(fila[11]) == 2113.00                                        # solo la boleta del mes
     assert "liquidaciones-sin-cerrar=2" in afp.headers["x-avisos"] and "incluidas=0" in afp.headers["x-avisos"]
     z = cli.get(f"{B}/planillas/{pids[10]}/exportar-plame-zip", headers=H(clave))
     assert not any(c in rem(z) for c in ("|0118|3545.36", "|0406|1556.50", "|0312|140.09"))
@@ -162,7 +162,7 @@ def test_solo_lo_cerrado_viaja_al_afp_plame_y_resumenes(entorno):
     cerrada = _cerrar(cli, clave, B, pids[10], ana).json()
     afp = cli.get(f"{B}/planillas/{pids[10]}/exportar-afpnet?formato=csv", headers=H(clave))
     filas = [l.split(",") for l in afp.text.strip().splitlines()]
-    assert len(filas) == 1 and float(filas[0][11]) == 5620.69                                           # boleta 2,075.33 + vacaciones 3,545.36
+    assert len(filas) == 1 and float(filas[0][11]) == 5658.36                                           # boleta 2,113.00 + vacaciones 3,545.36
     assert "liquidaciones-incluidas=1" in afp.headers["x-avisos"] and "liquidaciones-sin-cerrar=1" in afp.headers["x-avisos"]
     z = cli.get(f"{B}/planillas/{pids[10]}/exportar-plame-zip", headers=H(clave))
     lineas = [l for l in rem(z).splitlines() if l.startswith("01|45678912|")]
@@ -175,7 +175,7 @@ def test_solo_lo_cerrado_viaja_al_afp_plame_y_resumenes(entorno):
     # y al reabrir vuelve a salir de todo
     cli.post(f"{B}/liquidaciones/{cerrada['liquidacion_id']}/reabrir", headers=H(clave), json={"motivo": "Reapertura de prueba"})
     afp = cli.get(f"{B}/planillas/{pids[10]}/exportar-afpnet?formato=csv", headers=H(clave))
-    assert float([l.split(",") for l in afp.text.strip().splitlines()][0][11]) == 2075.33
+    assert float([l.split(",") for l in afp.text.strip().splitlines()][0][11]) == 2113.00
 
 
 def test_pdf_y_excel_borrador_y_definitivo(entorno):
