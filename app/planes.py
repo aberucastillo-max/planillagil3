@@ -11,6 +11,7 @@ REGIMENES = {
     "MYPE_PEQUENA": "MYPE · Pequeña empresa",
     "CONSTRUCCION_CIVIL": "Construcción Civil (obreros)",
 }
+PLAN_SIN_POST = {"GRATIS"}              # Post Planilla (asiento contable, AFPnet, PLAME, configuración) se habilita al elegir un plan de pago
 PLAN_SIN_CC = {"GRATIS"}                # el plan gratuito incluye Régimen General y MYPE (micro y pequeña); Construcción Civil requiere plan de pago
 
 

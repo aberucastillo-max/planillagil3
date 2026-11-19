@@ -120,3 +120,19 @@ def test_f20_catalogo_de_planes_oferta_y_precio_con_adicionales(entorno, monkeyp
     cli.post(f"{API}/admin/cuentas/masivo", headers=ADM, json={"ids": [cid], "accion": "CAMBIAR_PLAN", "plan": "ESTUDIO"})
     cli.patch(f"{API}/admin/cuentas/{cid}", headers=ADM, json={"max_empresas": 4, "max_trabajadores": 60})
     assert cli.get(f"{API}/admin/clientes", headers=ADM).json()["items"][0]["precio_mensual"] == 39 + 10 + 24
+
+
+def test_f22_gratis_20_activos_y_post_planilla_solo_con_plan(entorno, monkeypatch):
+    cli, _ = entorno
+    monkeypatch.setenv("SETUP_TOKEN", "codigo-admin-de-prueba")
+    gr = cli.post(f"{API}/admin/cuentas", headers=ADM, json={"nombre": "Libre", "plan": "GRATIS"}).json()
+    pa = cli.post(f"{API}/admin/cuentas", headers=ADM, json={"nombre": "Pago", "plan": "INICIO"}).json()
+    lim = {c["nombre"]: c["max_trabajadores"] for c in cli.get(f"{API}/admin/cuentas", headers=ADM).json()}
+    assert lim["Libre"] == 20 and lim["Pago"] == 50
+    for k, esperado in ((gr["api_key"], 403), (pa["api_key"], 200)):
+        h = {"X-API-Key": k}
+        eid = cli.post(f"{API}/empresas", headers=h, json={"ruc": "20111111111", "razon_social": "X SAC"}).json()["id"]
+        assert cli.get(f"{API}/empresas/{eid}/config/plame", headers=h).status_code == esperado
+        assert cli.get(f"{API}/empresas/{eid}/config/cuentas", headers=h).status_code == esperado
+        assert cli.get(f"{API}/empresas/{eid}/planillas/1/asiento", headers=h).status_code in ((403,) if esperado == 403 else (200, 404, 409, 422))
+        assert cli.get(f"{API}/empresas/{eid}/empleados", headers=h).status_code == 200                # lo demás sigue igual

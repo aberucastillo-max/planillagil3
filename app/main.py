@@ -1037,39 +1037,45 @@ def resumen_conceptos(periodo_id: int, empresa: Empresa = Depends(empresa_actual
 
 
 # ----------------------------------------------------------------------------- Post Planilla: configuración y asiento
-@app.get(API + "/empresas/{empresa_id}/config/plame")
+
+def exigir_post(acceso: Acceso = Depends(get_acceso), cuenta: Cuenta = Depends(get_cuenta)):
+    """Post Planilla solo con un plan elegido (el administrador siempre puede, para dar soporte)."""
+    if not acceso.admin and cuenta.plan in planes.PLAN_SIN_POST:
+        raise HTTPException(403, "Post Planilla (asiento contable, AFPnet y PLAME) se habilita al elegir un plan. Con el plan Gratis puede calcular y emitir boletas.")
+
+@app.get(API + "/empresas/{empresa_id}/config/plame", dependencies=[Depends(exigir_post)])
 def cfg_plame_listar(periodo_id: Optional[int] = None, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """Códigos PLAME por concepto: vigentes para el periodo (o el mes actual) y su historial de periodos de aplicación."""
     return postplanilla.listar(db, empresa, "plame", periodo_id)
 
 
-@app.post(API + "/empresas/{empresa_id}/config/plame", status_code=201)
+@app.post(API + "/empresas/{empresa_id}/config/plame", status_code=201, dependencies=[Depends(exigir_post)])
 def cfg_plame_registrar(datos: ConfigPlameIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     return postplanilla.registrar(db, empresa, "plame", datos)
 
 
-@app.delete(API + "/empresas/{empresa_id}/config/plame/{registro_id}")
+@app.delete(API + "/empresas/{empresa_id}/config/plame/{registro_id}", dependencies=[Depends(exigir_post)])
 def cfg_plame_eliminar(registro_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     return postplanilla.eliminar(db, empresa, "plame", registro_id)
 
 
-@app.get(API + "/empresas/{empresa_id}/config/cuentas")
+@app.get(API + "/empresas/{empresa_id}/config/cuentas", dependencies=[Depends(exigir_post)])
 def cfg_cuentas_listar(periodo_id: Optional[int] = None, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """Plan de cuentas contables por concepto: vigentes para el periodo (o el mes actual) y su historial."""
     return postplanilla.listar(db, empresa, "cuentas", periodo_id)
 
 
-@app.post(API + "/empresas/{empresa_id}/config/cuentas", status_code=201)
+@app.post(API + "/empresas/{empresa_id}/config/cuentas", status_code=201, dependencies=[Depends(exigir_post)])
 def cfg_cuentas_registrar(datos: ConfigCuentaIn, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     return postplanilla.registrar(db, empresa, "cuentas", datos)
 
 
-@app.delete(API + "/empresas/{empresa_id}/config/cuentas/{registro_id}")
+@app.delete(API + "/empresas/{empresa_id}/config/cuentas/{registro_id}", dependencies=[Depends(exigir_post)])
 def cfg_cuentas_eliminar(registro_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     return postplanilla.eliminar(db, empresa, "cuentas", registro_id)
 
 
-@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/asiento")
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/asiento", dependencies=[Depends(exigir_post)])
 def asiento_contable(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     """Asiento del periodo según el plan de cuentas vigente: planilla + liquidaciones CERRADAS. Provisional mientras el periodo esté abierto."""
     return postplanilla.asiento(db, empresa, _periodo(db, empresa, periodo_id))
@@ -1158,7 +1164,7 @@ def _sin_quincena(p: Periodo, que: str):
         raise HTTPException(409, f"La quincena es un adelanto: no genera {que}. Use el periodo «Fin de Mes» del mismo mes.")
 
 
-@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-afpnet")
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-afpnet", dependencies=[Depends(exigir_post)])
 def exportar_afpnet(periodo_id: int, formato: str = Query("xlsx", pattern="^(xlsx|csv)$"),
                     empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     p = _periodo(db, empresa, periodo_id)
@@ -1176,7 +1182,7 @@ def listar_regimenes(acceso: Acceso = Depends(get_acceso), db: Session = Depends
     return {"plan": acceso.cuenta.plan if acceso.cuenta else None, "regimenes": planes.estado_regimenes(db, acceso.cuenta.plan if acceso.cuenta else None)}
 
 
-@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-asiento")
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-asiento", dependencies=[Depends(exigir_post)])
 def exportar_asiento(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     p = _periodo(db, empresa, periodo_id)
     contenido = postplanilla.asiento_xlsx(db, empresa, p)
@@ -1192,7 +1198,7 @@ def exportar_sabana(periodo_id: int, empresa: Empresa = Depends(empresa_actual),
         "Content-Disposition": f"attachment; filename=SABANA_{empresa.ruc}_{p.anio}_{p.mes:02d}.xlsx"})
 
 
-@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-plame-zip")
+@app.get(API + "/empresas/{empresa_id}/planillas/{periodo_id}/exportar-plame-zip", dependencies=[Depends(exigir_post)])
 def exportar_plame(periodo_id: int, empresa: Empresa = Depends(empresa_actual), db: Session = Depends(get_db)):
     p = _periodo(db, empresa, periodo_id)
     _sin_quincena(p, "el PLAME")

@@ -18,7 +18,7 @@ from .models import Auditoria, ConfigComercial, Cuenta, Pago, PlanCatalogo
 AVISO_DIAS = 15
 # Planes comerciales por defecto (precio SIN IGV). Se siembran una vez y luego el administrador los edita en «Planes y precios».
 DEFAULT_PLANES = [  # codigo, nombre, precio, RUC, trabajadores por RUC, orden, activo, destacado
-    ("GRATIS", "Gratis", 0, 1, 10, 0, True, False),
+    ("GRATIS", "Gratis", 0, 1, 20, 0, True, False),
     ("INICIO", "Inicio", 29, 1, 50, 1, True, False),
     ("ESTUDIO", "Estudio", 39, 3, 50, 2, True, True),
     ("PROFESIONAL", "Profesional", 59, 3, 100, 3, True, False),
@@ -86,6 +86,10 @@ def sembrar_planes(db: Session):
     for cod, nombre, precio, me, mt, orden, activo, dest in DEFAULT_PLANES:
         if cod not in existentes:
             db.add(PlanCatalogo(codigo=cod, nombre=nombre, precio=Decimal(precio), max_empresas=me, max_trabajadores=mt, orden=orden, activo=activo, destacado=dest))
+    g = db.get(PlanCatalogo, "GRATIS")                  # Gratis pasó de 10 a 20 trabajadores activos: solo se sube si aún tiene el límite anterior
+    if g is not None and g.max_trabajadores == 10:
+        g.max_trabajadores = 20
+        db.query(Cuenta).filter(Cuenta.plan == "GRATIS", Cuenta.max_trabajadores == 10).update({"max_trabajadores": 20})
     claves = {c.clave for c in db.query(ConfigComercial)}
     for k, v in DEFAULT_CONFIG.items():
         if k not in claves:
