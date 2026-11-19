@@ -13,14 +13,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from . import planes, calculo, carga_masiva, carga_novedades, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
+from . import suscripcion as SUS, planes, calculo, carga_masiva, carga_novedades, certificado, exportadores, liquidacion as L, manuales, parametros_periodo, pdf_boleta, configuracion, pdf_liquidacion, postplanilla, reglas as R, semestrales
 from .config import allowed_origins
 from .db import get_db
 from .diccionario import ErrorDeNegocio, admite_carga
 from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionario, DiccionarioAFP, Empleado,
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
-from .models import Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
-from .schemas import (CargaMasivaIn, CatalogoEditIn, CatalogoIn, ConfigUnicoIn, ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
+from .models import Pago, Usuario, Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
+from .schemas import (CargaMasivaIn, CatalogoEditIn, CatalogoIn, ConfigUnicoIn, ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, RenovarIn, MasivoIn, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
                       RentaPreviaIn, SueldoIn, TarifasCcIn, VacacionIn)
 from .cc import TIPOS_OBRERO
 from .security import Acceso, empresa_actual, exigir_admin, generar_api_key, get_acceso, get_cuenta, hash_key
@@ -143,7 +143,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-17-f18"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-17-f19"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -238,19 +238,131 @@ def actualizar_empresa(data: EmpresaPatch, empresa: Empresa = Depends(empresa_ac
 
 
 # ------------------------------------------------------------------ administrador del software
+def _filas_clientes(db: Session, q: str = "", estado: str = "", plan: str = "", orden: str = "vence"):
+    """Una fila por cuenta con usuarios, correos, RUC, empresas y vigencia. Se arma con 4 consultas (no una por cuenta)."""
+    cuentas = db.query(Cuenta).all()
+    usuarios, empresas, trab = {}, {}, {}
+    for u in db.query(Usuario):
+        usuarios.setdefault(u.cuenta_id, []).append(u)
+    for e in db.query(Empresa):
+        empresas.setdefault(e.cuenta_id, []).append(e)
+    for eid, n in db.query(Empleado.empresa_id, func.count(Empleado.id)).filter(Empleado.estado == "ACTIVO").group_by(Empleado.empresa_id):
+        trab[eid] = n
+    hoy, filas, q = date.today(), [], (q or "").strip().lower()
+    for c in cuentas:
+        us, es = usuarios.get(c.id, []), empresas.get(c.id, [])
+        f = {"id": c.id, "nombre": c.nombre, "plan": c.plan, "activa": c.activa, "estado": SUS.estado(c, hoy), "vence_el": c.vence_el,
+             "dias_restantes": SUS.dias_restantes(c, hoy), "gracia_dias": c.gracia_dias, "max_empresas": c.max_empresas,
+             "max_trabajadores": c.max_trabajadores, "empresas": len(es), "trabajadores": sum(trab.get(e.id, 0) for e in es),
+             "correos": [u.email for u in us], "usuarios": len(us), "rucs": [e.ruc for e in es], "razones": [e.razon_social for e in es],
+             "creado_en": c.creado_en, "notas": c.notas}
+        if estado and f["estado"] != estado.upper():
+            continue
+        if plan and c.plan != plan.upper():
+            continue
+        if q and not any(q in t.lower() for t in [c.nombre] + f["correos"] + f["rucs"] + f["razones"] + [u.nombre for u in us]):
+            continue
+        filas.append(f)
+    clave = {"nombre": lambda f: f["nombre"].lower(), "creado": lambda f: f["creado_en"] or date.min,
+             "vence": lambda f: (f["vence_el"] is None, f["vence_el"] or date.max)}.get(orden, None) or (lambda f: f["nombre"].lower())
+    filas.sort(key=clave)
+    return filas
+
+
 @app.get(API + "/admin/cuentas")
 def admin_listar_cuentas(_: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
-    contar = lambda cid: db.query(Empresa).filter(Empresa.cuenta_id == cid).count()
-    return [{"id": c.id, "nombre": c.nombre, "plan": c.plan, "max_empresas": c.max_empresas,
-             "max_trabajadores": c.max_trabajadores, "activa": c.activa, "empresas": contar(c.id)}
-            for c in db.query(Cuenta).order_by(Cuenta.nombre)]
+    return [{k: f[k] for k in ("id", "nombre", "plan", "max_empresas", "max_trabajadores", "activa", "empresas", "estado", "vence_el")}
+            for f in _filas_clientes(db, orden="nombre")]
+
+
+@app.get(API + "/admin/clientes")
+def admin_clientes(q: str = "", estado: str = Query("", pattern="^(|VIGENTE|POR_VENCER|EN_GRACIA|VENCIDA|SUSPENDIDA|SIN_VENCIMIENTO)$"),
+                   plan: str = Query("", pattern="^(|GRATIS|FREELANCER)$"), orden: str = Query("vence", pattern="^(vence|nombre|creado)$"),
+                   pagina: int = Query(1, ge=1), tam: int = Query(25, ge=5, le=200), _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
+    """Tabla de clientes del administrador: búsqueda por correo / nombre / RUC / razón social, filtros por estado y plan, paginada."""
+    todos = _filas_clientes(db)
+    resumen = {e: 0 for e in SUS.ESTADOS}
+    for f in todos:
+        resumen[f["estado"]] += 1
+    filas = _filas_clientes(db, q, estado, plan, orden)
+    ini = (pagina - 1) * tam
+    return {"total": len(filas), "pagina": pagina, "tam": tam, "resumen": resumen, "items": filas[ini:ini + tam]}
+
+
+@app.get(API + "/admin/clientes/exportar")
+def admin_clientes_exportar(q: str = "", estado: str = "", plan: str = "", orden: str = "vence", _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
+    from io import BytesIO
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active; ws.title = "Clientes"
+    ws.append(["Cuenta", "Correos", "Plan", "Estado", "Vence el", "Días restantes", "Gracia (días)", "Empresas", "RUC", "Razón social", "Trabajadores activos", "Creada"])
+    for f in _filas_clientes(db, q, estado, plan, orden):
+        ws.append([f["nombre"], ", ".join(f["correos"]), f["plan"], f["estado"], f["vence_el"], f["dias_restantes"], f["gracia_dias"], f["empresas"],
+                   ", ".join(f["rucs"]), ", ".join(f["razones"]), f["trabajadores"], f["creado_en"].date() if f["creado_en"] else None])
+    for col, w in zip("ABCDEFGHIJKL", (28, 40, 12, 16, 12, 10, 10, 9, 28, 40, 12, 12)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf)
+    return Response(buf.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="clientes.xlsx"'})
+
+
+@app.get(API + "/admin/cuentas/{cuenta_id}/detalle")
+def admin_detalle_cuenta(cuenta_id: int, _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
+    c = db.get(Cuenta, cuenta_id)
+    if not c:
+        raise HTTPException(404, "Cuenta no encontrada.")
+    fila = next(f for f in _filas_clientes(db) if f["id"] == c.id)
+    cuenta_trab = dict(db.query(Empleado.empresa_id, func.count(Empleado.id)).filter(Empleado.estado == "ACTIVO").group_by(Empleado.empresa_id).all())
+    return {"cuenta": fila,
+            "usuarios": [{"id": u.id, "email": u.email, "nombre": u.nombre, "rol": u.rol, "activo": u.activo, "ultimo_acceso": u.ultimo_acceso}
+                         for u in db.query(Usuario).filter(Usuario.cuenta_id == c.id).order_by(Usuario.email)],
+            "empresas": [{"id": e.id, "ruc": e.ruc, "razon_social": e.razon_social, "regimen": e.regimen_codigo, "trabajadores": cuenta_trab.get(e.id, 0)}
+                         for e in db.query(Empresa).filter(Empresa.cuenta_id == c.id).order_by(Empresa.razon_social)],
+            "pagos": [{"fecha": p.fecha, "plan": p.plan, "meses": p.meses, "monto": p.monto, "metodo": p.metodo, "referencia": p.referencia,
+                       "vence_antes": p.vence_antes, "vence_despues": p.vence_despues, "nota": p.nota}
+                      for p in db.query(Pago).filter(Pago.cuenta_id == c.id).order_by(Pago.id.desc()).limit(50)],
+            "historial": [{"fecha": a.creado_en, "accion": a.accion, "detalle": a.detalle}
+                          for a in db.query(Auditoria).filter(Auditoria.cuenta_id == c.id, Auditoria.accion.like("ADMIN%")).order_by(Auditoria.id.desc()).limit(30)]}
+
+
+@app.post(API + "/admin/cuentas/{cuenta_id}/renovar")
+def admin_renovar(cuenta_id: int, data: RenovarIn, _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
+    c = db.get(Cuenta, cuenta_id)
+    if not c:
+        raise HTTPException(404, "Cuenta no encontrada.")
+    SUS.renovar(db, c, data.meses, data.plan, data.monto, data.referencia, data.nota)
+    db.commit()
+    return {"ok": True, "vence_el": c.vence_el, "plan": c.plan, "estado": SUS.estado(c)}
+
+
+@app.post(API + "/admin/cuentas/masivo")
+def admin_masivo(data: MasivoIn, _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
+    """Una acción para varias cuentas a la vez: renovar, cambiar plan, suspender o reactivar."""
+    if data.accion == "RENOVAR" and not data.meses:
+        raise HTTPException(422, "Indique cuántos meses renovar.")
+    if data.accion == "CAMBIAR_PLAN" and not data.plan:
+        raise HTTPException(422, "Indique el plan.")
+    hechas = 0
+    for c in db.query(Cuenta).filter(Cuenta.id.in_(data.ids)):
+        if data.accion == "RENOVAR":
+            SUS.renovar(db, c, data.meses, data.plan)
+        elif data.accion == "CAMBIAR_PLAN":
+            c.plan = data.plan
+            if data.plan in SUS.LIMITES_PLAN:
+                c.max_empresas, c.max_trabajadores = SUS.LIMITES_PLAN[data.plan]
+            db.add(Auditoria(cuenta_id=c.id, accion="ADMIN_EDITA_CUENTA", detalle=f"plan → {data.plan} (masivo)"))
+        else:
+            c.activa = data.accion == "REACTIVAR"
+            db.add(Auditoria(cuenta_id=c.id, accion="ADMIN_EDITA_CUENTA", detalle=("reactiva" if c.activa else "suspende") + " (masivo)"))
+        hechas += 1
+    db.commit()
+    return {"ok": True, "cuentas": hechas}
 
 
 @app.post(API + "/admin/cuentas", status_code=201)
 def admin_crear_cuenta(data: CuentaIn, _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
     """Crea una cuenta y devuelve su clave UNA sola vez. Reemplaza a la página /setup."""
-    maximos = {"GRATIS": (1, 10), "FREELANCER": (20, 10)}
-    me, mt = maximos[data.plan]
+    me, mt = SUS.LIMITES_PLAN[data.plan]
     clave = generar_api_key()
     c = Cuenta(nombre=data.nombre.strip(), plan=data.plan, max_empresas=me, max_trabajadores=mt, api_key_hash=hash_key(clave))
     db.add(c)

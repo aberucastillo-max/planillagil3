@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_db
 from . import usuarios as U
+from . import suscripcion as SUS
 from .models import Cuenta, Empresa, Usuario
 
 
@@ -39,6 +40,13 @@ class Acceso:
     token: str = ""
 
 
+def _exigir_plan_vigente(cuenta, request: Request):
+    """Plan vencido (pasada la gracia): solo lectura. Consultar y descargar siguen funcionando; no se calcula, cierra ni edita."""
+    if cuenta is not None and request.method not in ("GET", "HEAD", "OPTIONS") and "/auth/" not in request.url.path and SUS.solo_lectura(cuenta):
+        raise HTTPException(402, f"Su plan venció el {cuenta.vence_el:%d/%m/%Y}. Su información está a salvo y puede consultarla y descargarla; "
+                                 "para seguir calculando o editando, renueve su plan con el administrador.")
+
+
 def get_acceso(request: Request, x_api_key: str = Header(None, alias="X-API-Key"), x_admin_token: str = Header(None, alias="X-Admin-Token"),
                authorization: str = Header(None), db: Session = Depends(get_db)) -> Acceso:
     if authorization and authorization.lower().startswith("bearer ") and not x_admin_token:
@@ -51,6 +59,7 @@ def get_acceso(request: Request, x_api_key: str = Header(None, alias="X-API-Key"
             raise HTTPException(403, "Debe cambiar su contraseña temporal antes de continuar.")
         if u.rol == "CONSULTA" and request.method not in ("GET", "HEAD", "OPTIONS") and "/auth/" not in ruta:
             raise HTTPException(403, "Su usuario es de solo consulta: no puede modificar datos.")
+        _exigir_plan_vigente(u.cuenta, request)
         return Acceso(u.cuenta, False, u, token)
     if x_admin_token:
         if not _admin_valido(x_admin_token):
@@ -61,6 +70,7 @@ def get_acceso(request: Request, x_api_key: str = Header(None, alias="X-API-Key"
     cuenta = db.query(Cuenta).filter(Cuenta.api_key_hash == hash_key(x_api_key), Cuenta.activa.is_(True)).first()
     if not cuenta:
         raise HTTPException(401, "Credenciales incorrectas.")
+    _exigir_plan_vigente(cuenta, request)
     return Acceso(cuenta, False)
 
 

@@ -30,7 +30,27 @@ class Cuenta(Base):
     max_empresas = Column(Integer, nullable=False, default=1)
     max_trabajadores = Column(Integer, nullable=False, default=10)  # por empresa
     api_key_hash = Column(String(64), unique=True, nullable=False)
-    activa = Column(Boolean, nullable=False, default=True)
+    activa = Column(Boolean, nullable=False, default=True)               # False = suspendida por el administrador
+    vence_el = Column(Date)                                              # fecha de corte del plan (None = sin vencimiento, p. ej. GRATIS)
+    gracia_dias = Column(Integer, nullable=False, default=7)             # días de gracia tras vencer (todo normal); luego solo lectura
+    notas = Column(Text)                                                 # notas internas del administrador
+    creado_en = Column(DateTime(timezone=True), default=_now)
+
+
+class Pago(Base):
+    """Historial de renovaciones/pagos de una cuenta. Hoy se registran a mano; una pasarela futura escribiría aquí con metodo=PASARELA."""
+    __tablename__ = "pagos"
+    id = Column(Integer, primary_key=True)
+    cuenta_id = Column(Integer, ForeignKey("cuentas.id"), nullable=False, index=True)
+    fecha = Column(Date, nullable=False)
+    plan = Column(String(20), nullable=False)
+    meses = Column(Integer, nullable=False, default=1)
+    monto = Column(Numeric(12, 2))
+    metodo = Column(String(12), nullable=False, default="MANUAL")       # MANUAL | PASARELA
+    referencia = Column(String(80))                                      # n.º de operación, voucher, factura
+    vence_antes = Column(Date)
+    vence_despues = Column(Date)
+    nota = Column(String(200))
     creado_en = Column(DateTime(timezone=True), default=_now)
 
 

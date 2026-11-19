@@ -68,3 +68,32 @@ def test_acceso_de_administrador_protegido(entorno, monkeypatch):
     assert cli.get(f"{API}/empresas", headers={"X-Admin-Token": "solo-el-admin"}).status_code == 200
     # el administrador no puede usar rutas que requieren elegir una empresa sin indicarla (no existe la ruta): 404 de empresa
     assert cli.get(f"{API}/empresas/999999/empleados", headers={"X-Admin-Token": "solo-el-admin"}).status_code == 404
+
+
+def test_f19_clientes_vigencia_renovacion_y_solo_lectura(entorno, monkeypatch):
+    from datetime import date, timedelta
+    cli, nueva = entorno
+    monkeypatch.setenv("SETUP_TOKEN", "codigo-admin-de-prueba")
+    a, b, ea, eb = _dos_cuentas(cli, nueva)
+    t = cli.get(f"{API}/admin/clientes", headers=ADM).json()
+    assert t["total"] == 2 and t["resumen"]["SIN_VENCIMIENTO"] == 2
+    ida = next(f["id"] for f in t["items"] if f["nombre"] == "Estudio A")
+    assert cli.get(f"{API}/admin/clientes?q=20222222222", headers=ADM).json()["total"] == 1          # búsqueda por RUC
+    # vence hace 3 días → en gracia (todo normal); hace 10 → vencida (solo lectura)
+    cli.patch(f"{API}/admin/cuentas/{ida}", headers=ADM, json={"vence_el": str(date.today() - timedelta(days=3))})
+    assert cli.get(f"{API}/admin/clientes?estado=EN_GRACIA", headers=ADM).json()["total"] == 1
+    assert cli.post(f"{API}/empresas/{ea}/empleados", headers=KEY(a), json=_emp()).status_code == 201
+    cli.patch(f"{API}/admin/cuentas/{ida}", headers=ADM, json={"vence_el": str(date.today() - timedelta(days=10))})
+    assert cli.post(f"{API}/empresas/{ea}/empleados", headers=KEY(a), json=_emp("40123456")).status_code == 402
+    assert cli.get(f"{API}/empresas/{ea}/empleados", headers=KEY(a)).status_code == 200              # consultar sí
+    # renovar 1 mes desde hoy (ya había vencido) → vuelve a vigente y se guarda el pago
+    r = cli.post(f"{API}/admin/cuentas/{ida}/renovar", headers=ADM, json={"meses": 1, "monto": 49.9, "referencia": "OP-123"}).json()
+    assert r["estado"] in ("VIGENTE", "POR_VENCER") and r["vence_el"] > str(date.today())
+    assert cli.post(f"{API}/empresas/{ea}/empleados", headers=KEY(a), json=_emp("40123456")).status_code == 201
+    d = cli.get(f"{API}/admin/cuentas/{ida}/detalle", headers=ADM).json()
+    assert d["pagos"][0]["referencia"] == "OP-123" and d["empresas"][0]["ruc"] == "20111111111"
+    # masivo: suspender y reactivar
+    assert cli.post(f"{API}/admin/cuentas/masivo", headers=ADM, json={"ids": [ida], "accion": "SUSPENDER"}).json()["cuentas"] == 1
+    assert cli.get(f"{API}/admin/clientes?estado=SUSPENDIDA", headers=ADM).json()["total"] == 1
+    assert cli.get(f"{API}/admin/clientes/exportar", headers=ADM).status_code == 200
+    assert cli.get(f"{API}/admin/clientes", headers=KEY(b)).status_code == 403                       # una cuenta no ve la tabla del administrador

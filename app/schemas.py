@@ -248,7 +248,25 @@ class CuentaIn(BaseModel):
     plan: str = Field(default="GRATIS", pattern="^(GRATIS|FREELANCER)$")
 
 
+class RenovarIn(BaseModel):
+    meses: int = Field(ge=1, le=60)
+    plan: Optional[str] = Field(default=None, pattern="^(GRATIS|FREELANCER)$")
+    monto: Optional[float] = Field(default=None, ge=0)
+    referencia: Optional[str] = Field(default=None, max_length=80)
+    nota: Optional[str] = Field(default=None, max_length=200)
+
+
+class MasivoIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500)
+    accion: str = Field(pattern="^(RENOVAR|CAMBIAR_PLAN|SUSPENDER|REACTIVAR)$")
+    meses: Optional[int] = Field(default=None, ge=1, le=60)
+    plan: Optional[str] = Field(default=None, pattern="^(GRATIS|FREELANCER)$")
+
+
 class CuentaPatch(BaseModel):
+    vence_el: Optional[date] = None
+    gracia_dias: Optional[int] = Field(default=None, ge=0, le=90)
+    notas: Optional[str] = Field(default=None, max_length=500)
     plan: Optional[str] = Field(default=None, pattern="^(GRATIS|FREELANCER)$")
     max_empresas: Optional[int] = Field(default=None, ge=1, le=1000)
     max_trabajadores: Optional[int] = Field(default=None, ge=1, le=100000)
