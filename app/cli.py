@@ -8,7 +8,7 @@ from .models import Base, Cuenta
 from .security import generar_api_key, hash_key
 from .seed import sembrar_cc, sembrar_mype, sembrar_rg728
 
-PLANES = {"GRATIS": (1, 10), "FREELANCER": (20, 10)}   # (max_empresas, max_trabajadores por empresa) - ajustables
+PLANES = {"GRATIS": (1, 20), "FREELANCER": (20, 10)}   # (max_empresas, max_trabajadores por empresa) - ajustables
 
 
 def init_db():
