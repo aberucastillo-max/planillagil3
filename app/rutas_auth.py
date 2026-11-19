@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from . import usuarios as U
 from .db import get_db
 from .models import Auditoria, Cuenta, Usuario
+from .legal import legal_pendiente
+from .legal_textos import VERSION as LEGAL_VERSION
 from .security import Acceso, exigir_admin, exigir_propietario, get_acceso
 
 API = "/api/v1"
@@ -65,15 +67,16 @@ def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
     except U.ErrorAcceso as e:
         raise HTTPException(e.status, str(e))
     return {"token": token, "expira": exp, "usuario": _ficha(u), "cuenta": {"id": u.cuenta.id, "nombre": u.cuenta.nombre, "plan": u.cuenta.plan},
-            "debe_cambiar_clave": u.debe_cambiar_clave}
+            "debe_cambiar_clave": u.debe_cambiar_clave, "legal_pendiente": legal_pendiente(db, u), "legal_version": LEGAL_VERSION}
 
 
 @router.get(API + "/auth/yo")
-def yo(acceso: Acceso = Depends(get_acceso)):
+def yo(acceso: Acceso = Depends(get_acceso), db: Session = Depends(get_db)):
     if not acceso.usuario:
         raise HTTPException(400, "Esta credencial no es de un usuario.")
     u = acceso.usuario
-    return {"usuario": _ficha(u), "cuenta": {"id": u.cuenta.id, "nombre": u.cuenta.nombre, "plan": u.cuenta.plan}}
+    return {"usuario": _ficha(u), "cuenta": {"id": u.cuenta.id, "nombre": u.cuenta.nombre, "plan": u.cuenta.plan},
+            "legal_pendiente": legal_pendiente(db, u), "legal_version": LEGAL_VERSION}
 
 
 @router.post(API + "/auth/logout")

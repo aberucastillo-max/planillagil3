@@ -1,5 +1,6 @@
 """Acceso: (1) cuenta con su clave X-API-Key; (2) ADMINISTRADOR con X-Admin-Token (acceso a todas las cuentas y RUC).
 El código de administrador es ADMIN_TOKEN; si no existe se usa SETUP_TOKEN (etapa de pruebas)."""
+import re
 import hashlib
 import os
 import secrets
@@ -42,7 +43,7 @@ class Acceso:
 
 def _exigir_plan_vigente(cuenta, request: Request):
     """Plan vencido (pasada la gracia): solo lectura. Consultar y descargar siguen funcionando; no se calcula, cierra ni edita."""
-    if cuenta is not None and request.method not in ("GET", "HEAD", "OPTIONS") and "/auth/" not in request.url.path and SUS.solo_lectura(cuenta):
+    if cuenta is not None and request.method not in ("GET", "HEAD", "OPTIONS") and "/auth/" not in request.url.path and not (request.method == "DELETE" and re.fullmatch(r".*/empresas/\d+", request.url.path)) and SUS.solo_lectura(cuenta):
         raise HTTPException(402, f"Su plan venció el {cuenta.vence_el:%d/%m/%Y}. Su información está a salvo y puede consultarla y descargarla; "
                                  "para seguir calculando o editando, renueve su plan con el administrador.")
 

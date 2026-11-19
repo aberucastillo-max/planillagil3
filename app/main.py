@@ -39,6 +39,8 @@ app = FastAPI(title="Planilla Ágil API", version="2.0.0", lifespan=_ciclo_de_vi
 
 from .rutas_auth import router as _router_auth  # noqa: E402
 app.include_router(_router_auth)
+from .legal import router as _router_legal  # noqa: E402
+app.include_router(_router_legal)
 
 async def _captura_errores(request, call_next):
     """Un error inesperado o un rechazo de la base (triggers) debe llegar al navegador como JSON con su mensaje y con las
@@ -144,7 +146,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-17-f20"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-19-f21"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")

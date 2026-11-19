@@ -549,3 +549,16 @@ class CcValor(Base):
     valor = Column(Numeric(14, 6), nullable=False)
     vigente_desde = Column(Date, nullable=False)
     __table_args__ = (UniqueConstraint("empresa_id", "clave", "vigente_desde", name="uq_cc_valor"),)
+
+
+class Aceptacion(Base):
+    """Constancia de que un usuario aceptó Términos, Privacidad y Acuerdo de encargo (versión, fecha, IP)."""
+    __tablename__ = "aceptaciones_legales"
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, index=True)
+    cuenta_id = Column(Integer, ForeignKey("cuentas.id"), nullable=False, index=True)
+    email = Column(String(150), nullable=False)
+    version = Column(String(20), nullable=False)
+    documentos = Column(String(60), nullable=False, default="TERMINOS,PRIVACIDAD,ENCARGO")
+    ip = Column(String(60))
+    creado_en = Column(DateTime(timezone=True), default=_now)
