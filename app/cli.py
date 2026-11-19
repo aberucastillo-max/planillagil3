@@ -18,6 +18,8 @@ def init_db():
         sembrar_rg728(db)
         sembrar_mype(db)
         sembrar_cc(db)
+        from .suscripcion import sembrar_planes
+        sembrar_planes(db)
     finally:
         db.close()
     print("Tablas creadas y Diccionario RG_728 v1 sembrado.")

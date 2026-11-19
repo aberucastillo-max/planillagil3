@@ -97,3 +97,26 @@ def test_f19_clientes_vigencia_renovacion_y_solo_lectura(entorno, monkeypatch):
     assert cli.get(f"{API}/admin/clientes?estado=SUSPENDIDA", headers=ADM).json()["total"] == 1
     assert cli.get(f"{API}/admin/clientes/exportar", headers=ADM).status_code == 200
     assert cli.get(f"{API}/admin/clientes", headers=KEY(b)).status_code == 403                       # una cuenta no ve la tabla del administrador
+
+
+def test_f20_catalogo_de_planes_oferta_y_precio_con_adicionales(entorno, monkeypatch):
+    cli, nueva = entorno
+    monkeypatch.setenv("SETUP_TOKEN", "codigo-admin-de-prueba")
+    a = nueva("Estudio A", max_empresas=1)
+    of = cli.get(f"{API}/planes/oferta", headers=KEY(a)).json()
+    cods = [p["codigo"] for p in of["planes"]]
+    assert cods == ["GRATIS", "INICIO", "ESTUDIO", "PROFESIONAL", "EMPRESARIAL"]           # FREELANCER (antiguo) no se ofrece
+    pro = next(p for p in of["planes"] if p["codigo"] == "PROFESIONAL")
+    assert (pro["precio_mensual"], pro["max_empresas"], pro["max_trabajadores"]) == (59, 3, 100) and pro["precio_anual"] == 601.8   # 59×12×0.85
+    assert of["igv_incluido"] is False and of["cuenta"]["estado"] == "SIN_VENCIMIENTO"
+    # el administrador edita precio y WhatsApp
+    assert cli.put(f"{API}/admin/planes/INICIO", headers=ADM, json={"precio": 31}).status_code == 200
+    assert cli.put(f"{API}/admin/config-comercial", headers=ADM, json={"whatsapp": "+51 999-888-777"}).status_code == 200
+    of = cli.get(f"{API}/planes/oferta", headers=KEY(a)).json()
+    assert next(p for p in of["planes"] if p["codigo"] == "INICIO")["precio_mensual"] == 31 and of["config"]["whatsapp"] == "+51999888777"
+    assert cli.put(f"{API}/admin/planes/INICIO", headers=KEY(a), json={"precio": 1}).status_code == 403
+    # precio con adicionales: plan ESTUDIO (3 RUC × 50) con 4 RUC y 60 trab. por RUC → +10 por RUC y +0.60 × 10 × 4
+    cid = cli.get(f"{API}/admin/clientes", headers=ADM).json()["items"][0]["id"]
+    cli.post(f"{API}/admin/cuentas/masivo", headers=ADM, json={"ids": [cid], "accion": "CAMBIAR_PLAN", "plan": "ESTUDIO"})
+    cli.patch(f"{API}/admin/cuentas/{cid}", headers=ADM, json={"max_empresas": 4, "max_trabajadores": 60})
+    assert cli.get(f"{API}/admin/clientes", headers=ADM).json()["items"][0]["precio_mensual"] == 39 + 10 + 24

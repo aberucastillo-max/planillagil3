@@ -37,6 +37,25 @@ class Cuenta(Base):
     creado_en = Column(DateTime(timezone=True), default=_now)
 
 
+class PlanCatalogo(Base):
+    """Planes comerciales (precio SIN IGV por mes y límites). El administrador los edita; la pantalla de planes lee de aquí."""
+    __tablename__ = "plan_catalogo"
+    codigo = Column(String(20), primary_key=True)
+    nombre = Column(String(60), nullable=False)
+    precio = Column(Numeric(10, 2), nullable=False, default=0)
+    max_empresas = Column(Integer, nullable=False, default=1)           # RUC
+    max_trabajadores = Column(Integer, nullable=False, default=10)      # por RUC
+    orden = Column(Integer, nullable=False, default=0)
+    activo = Column(Boolean, nullable=False, default=True)              # False = plan antiguo: sigue funcionando pero no se ofrece
+    destacado = Column(Boolean, nullable=False, default=False)          # etiqueta «Más popular»
+
+
+class ConfigComercial(Base):
+    __tablename__ = "config_comercial"
+    clave = Column(String(40), primary_key=True)
+    valor = Column(String(200), nullable=False, default="")
+
+
 class Pago(Base):
     """Historial de renovaciones/pagos de una cuenta. Hoy se registran a mano; una pasarela futura escribiría aquí con metodo=PASARELA."""
     __tablename__ = "pagos"

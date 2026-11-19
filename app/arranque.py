@@ -53,6 +53,8 @@ def preparar_base():
         sembrar_rg728(db)
         sembrar_mype(db)
         sembrar_cc(db)
+        from .suscripcion import sembrar_planes
+        sembrar_planes(db)
         # Desde la etapa 4 la liquidación NO se guarda como borrador: solo existe cerrada. Se limpian los borradores antiguos.
         if "liquidaciones" in set(inspect(engine).get_table_names()):
             ids = [r[0] for r in db.execute(text("SELECT id FROM liquidaciones WHERE estado = 'ABIERTA'"))]

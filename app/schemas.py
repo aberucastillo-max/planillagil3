@@ -245,29 +245,46 @@ class CtsRevertirIn(CtsCalcularIn):
 
 class CuentaIn(BaseModel):
     nombre: str = Field(min_length=2, max_length=150)
-    plan: str = Field(default="GRATIS", pattern="^(GRATIS|FREELANCER)$")
+    plan: str = Field(default="GRATIS", pattern="^[A-Z_]{3,20}$")
 
 
 class RenovarIn(BaseModel):
     meses: int = Field(ge=1, le=60)
-    plan: Optional[str] = Field(default=None, pattern="^(GRATIS|FREELANCER)$")
+    plan: Optional[str] = Field(default=None, pattern="^[A-Z_]{3,20}$")
     monto: Optional[float] = Field(default=None, ge=0)
     referencia: Optional[str] = Field(default=None, max_length=80)
     nota: Optional[str] = Field(default=None, max_length=200)
+
+
+class PlanEditIn(BaseModel):
+    nombre: Optional[str] = Field(default=None, min_length=2, max_length=60)
+    precio: Optional[float] = Field(default=None, ge=0, le=100000)
+    max_empresas: Optional[int] = Field(default=None, ge=1, le=1000)
+    max_trabajadores: Optional[int] = Field(default=None, ge=1, le=100000)
+    activo: Optional[bool] = None
+    destacado: Optional[bool] = None
+
+
+class ConfigComercialIn(BaseModel):
+    whatsapp: Optional[str] = Field(default=None, max_length=30)
+    dscto_anual_pct: Optional[float] = Field(default=None, ge=0, le=90)
+    extra_ruc: Optional[float] = Field(default=None, ge=0, le=100000)
+    extra_trabajador: Optional[float] = Field(default=None, ge=0, le=100000)
+    precios_incluyen_igv: Optional[bool] = None
 
 
 class MasivoIn(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=500)
     accion: str = Field(pattern="^(RENOVAR|CAMBIAR_PLAN|SUSPENDER|REACTIVAR)$")
     meses: Optional[int] = Field(default=None, ge=1, le=60)
-    plan: Optional[str] = Field(default=None, pattern="^(GRATIS|FREELANCER)$")
+    plan: Optional[str] = Field(default=None, pattern="^[A-Z_]{3,20}$")
 
 
 class CuentaPatch(BaseModel):
     vence_el: Optional[date] = None
     gracia_dias: Optional[int] = Field(default=None, ge=0, le=90)
     notas: Optional[str] = Field(default=None, max_length=500)
-    plan: Optional[str] = Field(default=None, pattern="^(GRATIS|FREELANCER)$")
+    plan: Optional[str] = Field(default=None, pattern="^[A-Z_]{3,20}$")
     max_empresas: Optional[int] = Field(default=None, ge=1, le=1000)
     max_trabajadores: Optional[int] = Field(default=None, ge=1, le=100000)
     activa: Optional[bool] = None

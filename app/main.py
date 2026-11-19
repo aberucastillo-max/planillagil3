@@ -1,6 +1,7 @@
 """Planilla Ágil API v2.  Arranque:  uvicorn app.main:app --host 0.0.0.0 --port $PORT"""
 import html
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
@@ -19,8 +20,8 @@ from .db import get_db
 from .diccionario import ErrorDeNegocio, admite_carga
 from .models import (Auditoria, Ausentismo, Concepto, Cuenta, Detalle, Diccionario, DiccionarioAFP, Empleado,
                      Empresa, Novedad, Periodo, RentaPrevia5ta, Resultado, Sueldo, TipoSuspension, Vacacion)
-from .models import Pago, Usuario, Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
-from .schemas import (CargaMasivaIn, CatalogoEditIn, CatalogoIn, ConfigUnicoIn, ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, RenovarIn, MasivoIn, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
+from .models import Pago, PlanCatalogo, ConfigComercial, Usuario, Liquidacion, LiquidacionDetalle, LiquidacionManual, Vinculo
+from .schemas import (CargaMasivaIn, CatalogoEditIn, CatalogoIn, ConfigUnicoIn, ConfigCuentaIn, ConfigPlameIn, ConfigVigenciaIn, ManualEditIn, ManualIn, EmpresaPatch, ParametrosPeriodoIn, LiquidacionCerrarIn, CuentaIn, CuentaPatch, RenovarIn, MasivoIn, PlanEditIn, ConfigComercialIn, CtsCalcularIn, CtsDepositarIn, CtsRevertirIn, ReingresoIn, AusentismoIn, BajaIn, EmpleadoIn, EmpleadoPatch, EmpresaIn, MONEY, NovedadFila, PeriodoIn, ReaperturaIn,
                       RentaPreviaIn, SueldoIn, TarifasCcIn, VacacionIn)
 from .cc import TIPOS_OBRERO
 from .security import Acceso, empresa_actual, exigir_admin, generar_api_key, get_acceso, get_cuenta, hash_key
@@ -143,7 +144,7 @@ def raiz():
     return {"app": "Planilla Ágil API", "version": app.version}
 
 
-VERSION_API = "2026-11-17-f19"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
+VERSION_API = "2026-11-17-f20"      # sube con cada entrega: la pantalla la compara para avisar si el servicio quedó desactualizado
 
 
 @app.get(f"{API}/health")
@@ -249,13 +250,14 @@ def _filas_clientes(db: Session, q: str = "", estado: str = "", plan: str = "", 
     for eid, n in db.query(Empleado.empresa_id, func.count(Empleado.id)).filter(Empleado.estado == "ACTIVO").group_by(Empleado.empresa_id):
         trab[eid] = n
     hoy, filas, q = date.today(), [], (q or "").strip().lower()
+    cfg, cat = SUS.config(db), {p.codigo: p for p in db.query(PlanCatalogo)}
     for c in cuentas:
         us, es = usuarios.get(c.id, []), empresas.get(c.id, [])
         f = {"id": c.id, "nombre": c.nombre, "plan": c.plan, "activa": c.activa, "estado": SUS.estado(c, hoy), "vence_el": c.vence_el,
              "dias_restantes": SUS.dias_restantes(c, hoy), "gracia_dias": c.gracia_dias, "max_empresas": c.max_empresas,
              "max_trabajadores": c.max_trabajadores, "empresas": len(es), "trabajadores": sum(trab.get(e.id, 0) for e in es),
              "correos": [u.email for u in us], "usuarios": len(us), "rucs": [e.ruc for e in es], "razones": [e.razon_social for e in es],
-             "creado_en": c.creado_en, "notas": c.notas}
+             "creado_en": c.creado_en, "notas": c.notas, "precio_mensual": SUS.precio_cuenta(db, c, cfg, cat)}
         if estado and f["estado"] != estado.upper():
             continue
         if plan and c.plan != plan.upper():
@@ -277,7 +279,7 @@ def admin_listar_cuentas(_: Acceso = Depends(exigir_admin), db: Session = Depend
 
 @app.get(API + "/admin/clientes")
 def admin_clientes(q: str = "", estado: str = Query("", pattern="^(|VIGENTE|POR_VENCER|EN_GRACIA|VENCIDA|SUSPENDIDA|SIN_VENCIMIENTO)$"),
-                   plan: str = Query("", pattern="^(|GRATIS|FREELANCER)$"), orden: str = Query("vence", pattern="^(vence|nombre|creado)$"),
+                   plan: str = Query("", pattern="^([A-Z_]{3,20})?$"), orden: str = Query("vence", pattern="^(vence|nombre|creado)$"),
                    pagina: int = Query(1, ge=1), tam: int = Query(25, ge=5, le=200), _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
     """Tabla de clientes del administrador: búsqueda por correo / nombre / RUC / razón social, filtros por estado y plan, paginada."""
     todos = _filas_clientes(db)
@@ -325,11 +327,70 @@ def admin_detalle_cuenta(cuenta_id: int, _: Acceso = Depends(exigir_admin), db: 
                           for a in db.query(Auditoria).filter(Auditoria.cuenta_id == c.id, Auditoria.accion.like("ADMIN%")).order_by(Auditoria.id.desc()).limit(30)]}
 
 
+def _oferta(db: Session, cuenta):
+    cfg, cat = SUS.config(db), db.query(PlanCatalogo).filter(PlanCatalogo.activo.is_(True)).order_by(PlanCatalogo.orden).all()
+    dscto = Decimal(cfg["DSCTO_ANUAL_PCT"]) / 100
+    planes_ = []
+    for p in cat:
+        mensual = Decimal(p.precio)
+        anual = (mensual * 12 * (1 - dscto)).quantize(Decimal("0.01"))
+        planes_.append({"codigo": p.codigo, "nombre": p.nombre, "precio_mensual": mensual, "precio_anual": anual,
+                        "anual_por_mes": (anual / 12).quantize(Decimal("0.01")), "max_empresas": p.max_empresas,
+                        "max_trabajadores": p.max_trabajadores, "destacado": p.destacado,
+                        "con_construccion_civil": p.codigo not in planes.PLAN_SIN_CC, "actual": bool(cuenta and cuenta.plan == p.codigo)})
+    cta = None
+    if cuenta is not None:
+        cta = {"plan": cuenta.plan, "estado": SUS.estado(cuenta), "vence_el": cuenta.vence_el, "dias_restantes": SUS.dias_restantes(cuenta),
+               "gracia_dias": cuenta.gracia_dias, "precio_mensual": SUS.precio_cuenta(db, cuenta, cfg)}
+    return {"planes": planes_, "cuenta": cta, "igv_incluido": cfg["PRECIOS_INCLUYEN_IGV"] == "1",
+            "config": {"whatsapp": cfg["WHATSAPP"], "dscto_anual_pct": float(cfg["DSCTO_ANUAL_PCT"]), "extra_ruc": float(cfg["EXTRA_RUC"]),
+                       "extra_trabajador": float(cfg["EXTRA_TRABAJADOR"]), "precios_incluyen_igv": cfg["PRECIOS_INCLUYEN_IGV"] == "1"}}
+
+
+@app.get(API + "/planes/oferta")
+def oferta_de_planes(acceso: Acceso = Depends(get_acceso), db: Session = Depends(get_db)):
+    """Planes y precios para el pop del cliente (y para el editor del administrador), con la vigencia de su cuenta."""
+    return _oferta(db, acceso.cuenta)
+
+
+@app.put(API + "/admin/planes/{codigo}")
+def admin_editar_plan(codigo: str, data: PlanEditIn, _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
+    p = db.get(PlanCatalogo, codigo)
+    if not p:
+        raise HTTPException(404, "Plan no encontrado.")
+    for campo, valor in data.model_dump(exclude_unset=True).items():
+        if valor is None:
+            continue
+        setattr(p, campo, Decimal(str(valor)) if campo == "precio" else valor)
+    db.add(Auditoria(accion="ADMIN_EDITA_PLAN", detalle=f"{codigo}: {data.model_dump(exclude_unset=True)}"))
+    db.commit()
+    return {"ok": True}
+
+
+@app.put(API + "/admin/config-comercial")
+def admin_config_comercial(data: ConfigComercialIn, _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
+    claves = {"whatsapp": "WHATSAPP", "dscto_anual_pct": "DSCTO_ANUAL_PCT", "extra_ruc": "EXTRA_RUC", "extra_trabajador": "EXTRA_TRABAJADOR", "precios_incluyen_igv": "PRECIOS_INCLUYEN_IGV"}
+    for campo, valor in data.model_dump(exclude_unset=True).items():
+        if valor is None:
+            continue
+        v = ("1" if valor else "0") if campo == "precios_incluyen_igv" else (re.sub(r"[^0-9+]", "", valor) if campo == "whatsapp" else str(valor))
+        fila = db.get(ConfigComercial, claves[campo])
+        if fila:
+            fila.valor = v
+        else:
+            db.add(ConfigComercial(clave=claves[campo], valor=v))
+    db.add(Auditoria(accion="ADMIN_EDITA_PLANES", detalle="configuración comercial"))
+    db.commit()
+    return {"ok": True}
+
+
 @app.post(API + "/admin/cuentas/{cuenta_id}/renovar")
 def admin_renovar(cuenta_id: int, data: RenovarIn, _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
     c = db.get(Cuenta, cuenta_id)
     if not c:
         raise HTTPException(404, "Cuenta no encontrada.")
+    if data.plan and not SUS.plan_valido(db, data.plan):
+        raise HTTPException(422, "Ese plan no existe.")
     SUS.renovar(db, c, data.meses, data.plan, data.monto, data.referencia, data.nota)
     db.commit()
     return {"ok": True, "vence_el": c.vence_el, "plan": c.plan, "estado": SUS.estado(c)}
@@ -342,14 +403,15 @@ def admin_masivo(data: MasivoIn, _: Acceso = Depends(exigir_admin), db: Session 
         raise HTTPException(422, "Indique cuántos meses renovar.")
     if data.accion == "CAMBIAR_PLAN" and not data.plan:
         raise HTTPException(422, "Indique el plan.")
+    if data.plan and not SUS.plan_valido(db, data.plan):
+        raise HTTPException(422, "Ese plan no existe.")
     hechas = 0
     for c in db.query(Cuenta).filter(Cuenta.id.in_(data.ids)):
         if data.accion == "RENOVAR":
             SUS.renovar(db, c, data.meses, data.plan)
         elif data.accion == "CAMBIAR_PLAN":
             c.plan = data.plan
-            if data.plan in SUS.LIMITES_PLAN:
-                c.max_empresas, c.max_trabajadores = SUS.LIMITES_PLAN[data.plan]
+            c.max_empresas, c.max_trabajadores = SUS.limites(db, data.plan)
             db.add(Auditoria(cuenta_id=c.id, accion="ADMIN_EDITA_CUENTA", detalle=f"plan → {data.plan} (masivo)"))
         else:
             c.activa = data.accion == "REACTIVAR"
@@ -362,7 +424,9 @@ def admin_masivo(data: MasivoIn, _: Acceso = Depends(exigir_admin), db: Session 
 @app.post(API + "/admin/cuentas", status_code=201)
 def admin_crear_cuenta(data: CuentaIn, _: Acceso = Depends(exigir_admin), db: Session = Depends(get_db)):
     """Crea una cuenta y devuelve su clave UNA sola vez. Reemplaza a la página /setup."""
-    me, mt = SUS.LIMITES_PLAN[data.plan]
+    if not SUS.plan_valido(db, data.plan):
+        raise HTTPException(422, "Ese plan no existe.")
+    me, mt = SUS.limites(db, data.plan)
     clave = generar_api_key()
     c = Cuenta(nombre=data.nombre.strip(), plan=data.plan, max_empresas=me, max_trabajadores=mt, api_key_hash=hash_key(clave))
     db.add(c)

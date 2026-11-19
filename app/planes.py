@@ -11,11 +11,11 @@ REGIMENES = {
     "MYPE_PEQUENA": "MYPE · Pequeña empresa",
     "CONSTRUCCION_CIVIL": "Construcción Civil (obreros)",
 }
-PLAN_SOLO_GENERAL = {"GRATIS"}          # el plan gratuito solo incluye el Régimen General; los demás planes incluyen todos
+PLAN_SIN_CC = {"GRATIS"}                # el plan gratuito incluye Régimen General y MYPE (micro y pequeña); Construcción Civil requiere plan de pago
 
 
 def permitido_por_plan(plan: str, codigo: str) -> bool:
-    return codigo == "RG_728" or plan not in PLAN_SOLO_GENERAL
+    return codigo != "CONSTRUCCION_CIVIL" or plan not in PLAN_SIN_CC
 
 
 def estado_regimenes(db: Session, plan: str | None) -> list:
